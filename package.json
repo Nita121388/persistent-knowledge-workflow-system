@@ -1,0 +1,19 @@
+{
+  "name": "persistent-knowledge-workflow-system",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter @pkws/server dev\" \"pnpm --filter @pkws/web dev\"",
+    "dev:server": "pnpm --filter @pkws/server dev",
+    "dev:web": "pnpm --filter @pkws/web dev",
+    "build": "pnpm --filter @pkws/shared build && pnpm --filter @pkws/storage build && pnpm --filter @pkws/vault build && pnpm --filter @pkws/ai build && pnpm --filter @pkws/server build && pnpm --filter @pkws/web build",
+    "db:generate": "pnpm --filter @pkws/storage db:generate",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@10.14.0"
+}

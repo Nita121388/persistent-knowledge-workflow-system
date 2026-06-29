@@ -1,0 +1,29 @@
+{
+  "name": "@pkws/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "db:generate": "drizzle-kit generate --config=../storage/drizzle.config.ts",
+    "db:migrate": "tsx src/db-migrate.ts"
+  },
+  "dependencies": {
+    "@pkws/shared": "workspace:*",
+    "@pkws/storage": "workspace:*",
+    "@pkws/vault": "workspace:*",
+    "@pkws/ai": "workspace:*",
+    "fastify": "^5.2.0",
+    "@fastify/cors": "^10.1.0",
+    "chokidar": "^4.0.3",
+    "p-queue": "^8.1.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "drizzle-kit": "^0.30.0"
+  }
+}
