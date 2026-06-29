@@ -6,7 +6,6 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@pkws/shared": "workspace:*",
-    "better-sqlite3": "^11.7.0",
     "drizzle-orm": "^0.38.0"
   },
   "devDependencies": {

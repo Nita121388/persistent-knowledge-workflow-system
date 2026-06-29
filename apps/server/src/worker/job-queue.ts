@@ -1,5 +1,6 @@
 import { getDb, schema } from '@pkws/storage';
 import { genJobId, type JobType, type Job } from '@pkws/shared/utils.js';
+import { eq, and } from 'drizzle-orm';
 
 export interface CreateJobParams {
   type: JobType;
@@ -110,13 +111,6 @@ export async function processNextJob(): Promise<boolean> {
   return true;
 }
 
-function eq(col: any, val: any) {
-  // Re-export from drizzle
-  const { eq: drizzleEq } = require('drizzle-orm');
-  return drizzleEq(col, val);
-}
-
-// Check if there's a pending proposal for a case
 export async function isJobPending(caseId: string, type: JobType): Promise<boolean> {
   const db = getDb();
   const existing = db.select()
@@ -125,7 +119,6 @@ export async function isJobPending(caseId: string, type: JobType): Promise<boole
       and(
         eq(schema.jobs.type, type),
         eq(schema.jobs.status, 'queued'),
-        // Check payload contains caseId
       )
     )
     .limit(1)

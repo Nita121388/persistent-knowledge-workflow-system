@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost } from '../lib/api.js';
-import { cn, getStatusColor } from '../lib/utils.js';
+import { cn, getStatusColor, timeAgo } from '../lib/utils.js';
 import type { CaseDetail, PatchPreview, Proposal, PatchIntent } from '@pkws/shared';
-import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FileUp, Tags, Move, FilePlus } from 'lucide-react';
+import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FilePlus, FolderOpen, FileText } from 'lucide-react';
 
 export function CaseDetailPage() {
   const { caseId } = useParams<{ caseId: string }>();
@@ -103,6 +103,33 @@ export function CaseDetailPage() {
   const showProposal = proposal && ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
   const showPatch = patch && patch.status === 'preview';
 
+  const handleBrowseDir = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.setAttribute('webkitdirectory', '');
+    input.setAttribute('directory', '');
+    input.style.display = 'none';
+
+    input.addEventListener('change', (e) => {
+      const files = (e.target as HTMLInputElement).files;
+      if (files && files.length > 0) {
+        const fullPath = files[0].webkitRelativePath;
+        const dirPath = fullPath.substring(0, fullPath.length - files[0].webkitRelativePath.length);
+        // Extract relative path from vault root if possible
+        const vaultPath = caseDetail?.anchor?.currentVaultPath || '';
+        if (vaultPath && dirPath.startsWith(vaultPath)) {
+          setPatchTarget(dirPath.substring(vaultPath.length).replace(/^[\/\\]/, '') + '/');
+        } else {
+          setPatchTarget(dirPath.replace(/\/$/, '') + '/');
+        }
+      }
+    });
+
+    document.body.appendChild(input);
+    input.click();
+    setTimeout(() => document.body.removeChild(input), 1000);
+  };
+
   return (
     <div className="p-6 max-w-4xl mx-auto">
       {/* Header */}
@@ -118,13 +145,28 @@ export function CaseDetailPage() {
             </span>
           </div>
           {caseDetail.anchor && (
-            <p className="text-xs text-gray-400 flex items-center gap-1">
+            <div className="flex items-center gap-2 text-xs text-gray-400 flex-wrap">
               <span className="font-mono">{caseDetail.anchor.id}</span>
               <span>·</span>
-              <span className="truncate">{caseDetail.anchor.currentVaultPath}</span>
-            </p>
+              <button
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.value = caseDetail.anchor.currentVaultPath;
+                  document.body.appendChild(input);
+                  input.select();
+                  navigator.clipboard?.writeText(caseDetail.anchor.currentVaultPath);
+                  document.body.removeChild(input);
+                }}
+                className="font-mono truncate max-w-[300px] hover:text-gray-600 hover:underline cursor-pointer"
+                title="Click to copy path"
+              >
+                {caseDetail.anchor.currentVaultPath}
+              </button>
+            </div>
           )}
-          <p className="text-xs text-gray-400 mt-0.5">Source: {c.source} · Updated {new Date(c.updatedAt).toLocaleString()}</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Source: {c.source} · Updated {timeAgo(c.updatedAt)}
+          </p>
         </div>
       </div>
 
@@ -187,13 +229,25 @@ export function CaseDetailPage() {
             </div>
             <div>
               <label className="text-xs text-gray-500 block mb-1">Target Path</label>
-              <input
-                type="text"
-                value={patchTarget}
-                onChange={e => setPatchTarget(e.target.value)}
-                placeholder="e.g., Resource/AI Tools/article.md"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={patchTarget}
+                  onChange={e => setPatchTarget(e.target.value)}
+                  placeholder="e.g., Resource/AI Tools/article.md"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={handleBrowseDir}
+                  title="Browse vault folders"
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  <span className="hidden sm:inline">Browse</span>
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">Relative to vault root, or leave blank for AI to decide</p>
             </div>
             <div>
               <label className="text-xs text-gray-500 block mb-1">Instructions (optional)</label>
@@ -318,7 +372,7 @@ export function CaseDetailPage() {
             {patch.operations?.map((op: any, i: number) => (
               <div key={i} className="bg-gray-50 rounded p-3 text-sm">
                 <span className="font-medium text-gray-700">
-                  {op.type === 'create_file' && <><FileUp className="w-4 h-4 inline mr-1 text-green-600" /> Create</>}
+                  {op.type === 'create_file' && <><FileText className="w-4 h-4 inline mr-1 text-green-600" /> New</>}
                   {op.type === 'update_file' && <><FileOutput className="w-4 h-4 inline mr-1 text-blue-600" /> Update</>}
                   {op.type === 'move_file' && <><Move className="w-4 h-4 inline mr-1 text-purple-600" /> Move</>}
                 </span>
@@ -405,7 +459,7 @@ export function CaseDetailPage() {
               <div className="flex-1 min-w-0">
                 <p className="text-gray-700">{event.summary}</p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  {event.actor} · {new Date(event.createdAt).toLocaleString()}
+                  {event.actor} · {timeAgo(event.createdAt)}
                 </p>
               </div>
             </div>

@@ -9,7 +9,7 @@ import { workspaceRuleRoutes } from './routes/workspace-rules.js';
 import { jobRoutes } from './routes/jobs.js';
 import { healthRoutes } from './routes/health.js';
 import { startWorker } from './worker/index.js';
-import { startFileWatcher } from './watcher.js';
+import { initFileWatcher } from './watcher.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,7 +40,7 @@ async function main() {
   if (!needsSetup) {
     initStorage(workspacePath);
     startWorker();
-    startFileWatcher();
+    initFileWatcher();
   }
 
   // Register routes

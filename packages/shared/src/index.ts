@@ -1,3 +1,6 @@
+// Re-export everything from utils so packages can import from @pkws/shared
+export * from './utils.js';
+
 // ID types
 export type AnchorId = `kw_${string}`;
 export type CaseId = `case_${string}`;

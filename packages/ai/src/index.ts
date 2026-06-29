@@ -1,4 +1,4 @@
-import { createOpenAICompatible } from '@ai-sdk/openai';
+import { createOpenAI } from '@ai-sdk/openai';
 import { generateObject } from 'ai';
 import { ProposalOutputSchema, type Proposal, type Settings } from '@pkws/shared';
 import { genProposalId } from '@pkws/shared/utils.js';
@@ -59,10 +59,9 @@ Generate a structured proposal for how to handle this content. Be specific about
 }
 
 export async function testModel(config: AiConfig): Promise<{ model: string; latencyMs: number }> {
-  const provider = createOpenAICompatible({
+  const provider = createOpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    name: 'test-provider',
   });
 
   const model = provider.languageModel(config.defaultModel);
@@ -70,7 +69,7 @@ export async function testModel(config: AiConfig): Promise<{ model: string; late
 
   await generateObject({
     model,
-    schema: z => z.object({ ok: z.boolean() }),
+    schema: (z: any) => z.object({ ok: z.boolean() }),
     prompt: 'Respond with { "ok": true }',
     maxTokens: 50,
   });
@@ -97,10 +96,9 @@ export async function generateProposal(
   caseId: string,
 ): Promise<Proposal> {
   const config = getAiConfig();
-  const provider = createOpenAICompatible({
+  const provider = createOpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    name: 'pkws-provider',
   });
 
   const model = provider.languageModel(config.defaultModel);
@@ -141,12 +139,11 @@ export async function generatePatchContent(
   instructionSummary: string | undefined,
   workspaceRules: string | undefined,
   caseId: string,
-): Promise<{ operations: string }> {
+): Promise<string> {
   const config = getAiConfig();
-  const provider = createOpenAICompatible({
+  const provider = createOpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    name: 'pkws-provider',
   });
 
   const model = provider.languageModel(config.defaultModel);
@@ -180,7 +177,7 @@ Generate a JSON array of patch operations.`;
 
   const result = await generateObject({
     model,
-    schema: z => z.object({
+    schema: (z: any) => z.object({
       operations: z.array(z.object({
         type: z.enum(['create_file', 'update_file', 'move_file']),
         path: z.string().optional(),

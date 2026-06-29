@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 let watcher: any = null;
+let _inboxPath: string | null = null;
 
 export function startFileWatcher() {
   // Check if watcher already started
@@ -24,13 +25,20 @@ export function startFileWatcher() {
   }
 }
 
-export function initFileWatcher(inboxPath: string) {
+export function initFileWatcher(inboxPath?: string) {
   if (watcher) {
     watcher.close();
   }
 
+  const targetPath = inboxPath || _inboxPath;
+  if (!targetPath) {
+    console.log('No inbox path configured, cannot start watcher');
+    return;
+  }
+  _inboxPath = targetPath;
+
   import('chokidar').then(({ watch }) => {
-    watcher = watch(inboxPath, {
+    watcher = watch(targetPath, {
       ignored: /(^|[\/\\])\../,
       persistent: true,
       ignoreInitial: true,
@@ -55,7 +63,7 @@ export function initFileWatcher(inboxPath: string) {
       }
     });
 
-    console.log(`File watcher started on: ${inboxPath}`);
+    console.log(`File watcher started on: ${targetPath}`);
   }).catch(err => {
     console.error('Failed to load chokidar:', err);
   });

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { initStorage } from '@pkws/storage';
 import { startWorker } from '../worker/index.js';
-import { startFileWatcher } from '../watcher.js';
+import { initFileWatcher } from '../watcher.js';
 
 const CONFIG_PATH = path.join(import.meta.dirname, '..', '..', 'config.json');
 
@@ -176,7 +176,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
     // Start worker and watcher if not already running
     startWorker();
-    startFileWatcher();
+    initFileWatcher(data.inboxPath);
 
     return {
       ok: true,

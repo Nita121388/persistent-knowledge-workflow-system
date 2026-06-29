@@ -1,5 +1,5 @@
 import { getDb, schema } from '@pkws/storage';
-import { eq, and, like } from 'drizzle-orm';
+import { eq, and, like, inArray } from 'drizzle-orm';
 import { generateProposal, generatePatchContent, getAiConfig } from '@pkws/ai';
 import { readMarkdown, computeHash, writePkwsId, executePatch, rollbackApply, scanMarkdownFiles } from '@pkws/vault';
 import {
@@ -564,7 +564,4 @@ async function handleRollbackApply(job: Job) {
   }
 }
 
-function inArray(col: any, vals: any[]) {
-  const { inArray: drizzleInArray } = require('drizzle-orm');
-  return drizzleInArray(col, vals);
-}
+
