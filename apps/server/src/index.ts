@@ -41,6 +41,9 @@ async function main() {
     initStorage(workspacePath);
     startWorker();
     initFileWatcher();
+  } else {
+    // Delete stale config.json so fresh setup creates proper DB
+    try { fs.unlinkSync(configPath); } catch {}
   }
 
   // Register routes
@@ -52,7 +55,7 @@ async function main() {
   await app.register(workspaceRuleRoutes, { prefix: '/api' });
   await app.register(jobRoutes, { prefix: '/api' });
 
-  const port = process.env.PORT ? parseInt(process.env.PORT) : 3721;
+  const port = process.env.PORT ? parseInt(process.env.PORT) : 3731;
   const host = process.env.HOST || '0.0.0.0';
 
   try {

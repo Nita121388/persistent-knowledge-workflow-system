@@ -1,0 +1,20 @@
+{
+  "baseUrl": "http://127.0.0.1:5174",
+  "backend": "http://127.0.0.1:3731",
+  "browserChannel": "chrome",
+  "authState": "playwright/.auth/user.json",
+  "vaultPath": "",
+  "inboxPath": "",
+  "workspacePath": "",
+  "aiProvider": "openai-compatible",
+  "aiBaseUrl": "https://api.openai.com/v1",
+  "aiApiKey": "",
+  "aiDefaultModel": "gpt-4.1-mini",
+  "autoAnalyze": false,
+  "repeat": 1,
+  "viewports": "desktop-1280",
+  "pageTimeout": 30000,
+  "testTimeout": 120000,
+  "typeDelay": 25,
+  "headed": false
+}

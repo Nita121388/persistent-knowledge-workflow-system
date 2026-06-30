@@ -24,11 +24,15 @@ export function createNodeSqliteClient(dbPath: string) {
     return stmt;
   }
 
-  /** Normalize params: node:sqlite doesn't accept booleans, convert to 0/1. */
+  /** Normalize params: node:sqlite is very picky. Must be string, number, null, or Buffer. */
   function normalizeParams(params: any[]): any[] {
     return params.map(p => {
+      if (p === null || p === undefined) return null;
       if (typeof p === 'boolean') return p ? 1 : 0;
-      return p;
+      if (typeof p === 'number' || typeof p === 'bigint') return p;
+      // Everything else (objects, arrays, undefined) — stringify
+      // node:sqlite only accepts string | number | null | Buffer
+      return String(p);
     });
   }
 

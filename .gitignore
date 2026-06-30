@@ -5,3 +5,4 @@ dist/
 .pkws-workspace/
 .DS_Store
 thumbs.db
+*.tsbuildinfo

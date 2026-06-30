@@ -4,7 +4,7 @@
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
-    "dev": "node --experimental-sqlite --import tsx watch src/index.ts",
+    "dev": "node --experimental-sqlite --import tsx/esm --watch src/index.ts",
     "start": "node --experimental-sqlite dist/index.js",
     "build": "tsc",
     "db:generate": "drizzle-kit generate --config=../storage/drizzle.config.ts",

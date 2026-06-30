@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPut, apiPost } from '../lib/api.js';
@@ -17,65 +17,25 @@ interface PathInputProps {
 }
 
 function PathInput({ label, value, onChange, placeholder, expectExists, expectCreatable }: PathInputProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleBrowse = () => {
-    // Use a hidden input to trigger native folder picker
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.setAttribute('webkitdirectory', '');
-    input.setAttribute('directory', '');
-    input.style.display = 'none';
-
-    input.addEventListener('change', (e) => {
-      const files = (e.target as HTMLInputElement).files;
-      if (files && files.length > 0) {
-        // Extract the directory path from the first file's webkitRelativePath
-        const fullPath = files[0].webkitRelativePath;
-        const dirPath = fullPath.substring(0, fullPath.length - files[0].webkitRelativePath.length);
-        onChange(dirPath.replace(/\/$/, ''));
-      }
-    });
-
-    document.body.appendChild(input);
-    input.click();
-    setTimeout(() => document.body.removeChild(input), 1000);
-  };
-
   return (
     <div>
       <label className="block text-sm font-medium text-gray-700 mb-1.5">{label}</label>
-      <div className="relative flex items-center gap-2">
-        <div className="relative flex-1">
-          <input
-            ref={inputRef}
-            type="text"
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            placeholder={placeholder}
-            className="w-full pl-3 pr-10 py-2.5 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-pkws-500 focus:border-pkws-500 transition-colors"
-          />
-          {value && (
-            <div className="absolute right-3 top-1/2 -translate-y-1/2">
-              <CheckCircle2 className="w-4 h-4 text-green-500" />
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={handleBrowse}
-          title="Browse folders"
-          className="flex items-center gap-1.5 px-3 py-2.5 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:border-gray-400 transition-colors text-gray-600 whitespace-nowrap"
-        >
-          <FolderOpen className="w-4 h-4" />
-          <span className="hidden sm:inline">Browse</span>
-        </button>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="flex-1 w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-pkws-500 focus:border-pkws-500 transition-colors"
+        />
       </div>
       <p className="text-xs text-gray-400 mt-1">
         {label.includes('Vault') && 'Your Obsidian vault root directory'}
         {label.includes('Inbox') && 'Where Obsidian Web Clipper saves notes (must be inside vault)'}
         {label.includes('Workspace') && 'Where PKWS stores its data (must be outside vault)'}
+      </p>
+      <p className="text-xs text-gray-400 mt-0.5">
+        PKWS reads files directly from your local disk — no upload needed.
       </p>
     </div>
   );
@@ -195,7 +155,7 @@ export function SetupWizard() {
                 label="Obsidian Vault Path"
                 value={vaultPath}
                 onChange={setVaultPath}
-                placeholder="E:/File/NitaFile/Obsidians/Obsidian"
+                placeholder="/path/to/obsidian/vault"
                 expectExists
               />
 
@@ -203,7 +163,7 @@ export function SetupWizard() {
                 label="Clipper Inbox Path"
                 value={inboxPath}
                 onChange={setInboxPath}
-                placeholder="E:/File/NitaFile/Obsidians/Obsidian/Inbox/Web Clips"
+                placeholder="/path/to/vault/inbox"
                 expectExists
               />
 
@@ -211,7 +171,7 @@ export function SetupWizard() {
                 label="Workspace Path"
                 value={workspacePath}
                 onChange={setWorkspacePath}
-                placeholder="E:/code/pkws-workspace"
+                placeholder="/path/to/pkws-workspace"
                 expectCreatable
               />
             </div>

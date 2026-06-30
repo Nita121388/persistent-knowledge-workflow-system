@@ -76,7 +76,10 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     // Validate inbox is inside vault
     const resolvedInbox = path.resolve(data.inboxPath);
     const resolvedVault = path.resolve(data.vaultPath);
-    if (!resolvedInbox.startsWith(resolvedVault)) {
+    const inboxIsInside = resolvedInbox === resolvedVault ||
+      resolvedInbox.startsWith(resolvedVault + path.sep) ||
+      resolvedInbox.startsWith(resolvedVault + '/');
+    if (!inboxIsInside) {
       return reply.status(400).send({
         ok: false,
         error: { code: 'VALIDATION_ERROR', message: 'Inbox path must be inside vault path' },
@@ -85,7 +88,10 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
     // Validate workspace is NOT inside vault
     const resolvedWs = path.resolve(data.workspacePath);
-    if (resolvedWs.startsWith(resolvedVault)) {
+    const wsIsParent = resolvedVault === resolvedWs ||
+      resolvedWs.startsWith(resolvedVault + path.sep) ||
+      resolvedWs.startsWith(resolvedVault + '/');
+    if (wsIsParent) {
       return reply.status(400).send({
         ok: false,
         error: { code: 'VALIDATION_ERROR', message: 'Workspace path should not be inside vault path' },

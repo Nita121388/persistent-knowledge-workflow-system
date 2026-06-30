@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost } from '../lib/api.js';
 import { cn, getStatusColor, timeAgo } from '../lib/utils.js';
 import type { CaseDetail, PatchPreview, Proposal, PatchIntent } from '@pkws/shared';
-import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FilePlus, FolderOpen, FileText } from 'lucide-react';
+import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FilePlus, FolderOpen, FileText, Move, ExternalLink } from 'lucide-react';
 
 export function CaseDetailPage() {
   const { caseId } = useParams<{ caseId: string }>();
@@ -281,6 +281,12 @@ export function CaseDetailPage() {
             <Bot className="w-5 h-5 text-blue-600" />
             <h2 className="font-semibold">AI Proposal</h2>
             <span className="text-xs text-gray-400">({proposal.model})</span>
+            <button
+              onClick={() => navigate(`/cases/${caseId}/proposal`)}
+              className="ml-auto text-xs text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1"
+            >
+              <ExternalLink className="w-3 h-3" /> Full Review
+            </button>
           </div>
 
           <div className="space-y-3">
@@ -351,6 +357,12 @@ export function CaseDetailPage() {
             <div className="flex items-center gap-2">
               <FileOutput className="w-5 h-5 text-amber-600" />
               <h2 className="font-semibold">Patch Preview</h2>
+              <button
+                onClick={() => navigate(`/cases/${caseId}/patch`)}
+                className="ml-2 text-xs text-amber-600 hover:text-amber-800 hover:underline flex items-center gap-1"
+              >
+                <ExternalLink className="w-3 h-3" /> Full Details
+              </button>
             </div>
             <div className="flex gap-2">
               <button
@@ -369,7 +381,7 @@ export function CaseDetailPage() {
           </div>
 
           <div className="space-y-3">
-            {patch.operations?.map((op: any, i: number) => (
+            {(patch as any).operations?.map((op: any, i: number) => (
               <div key={i} className="bg-gray-50 rounded p-3 text-sm">
                 <span className="font-medium text-gray-700">
                   {op.type === 'create_file' && <><FileText className="w-4 h-4 inline mr-1 text-green-600" /> New</>}

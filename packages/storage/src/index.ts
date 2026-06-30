@@ -20,13 +20,17 @@ function makeSqlExecutor(client: NodeSqliteClient) {
         return { rows: result.rows, insertId: result.insertId };
       }
       case 'all':
-        return { rows: client.all(sql, params) as any[] };
+        // node:sqlite .all() returns objects [{col: val, ...}]
+        // drizzle expects array of value arrays [[val1, val2, ...]]
+        // Strip keys: convert to array of arrays matching column order
+        return { rows: client.all(sql, params).map((r: any) => Object.values(r)) };
       case 'get': {
         const row = client.get(sql, params);
-        return { rows: row ? [row] : [] };
+        // drizzle expects array of values or null, not object
+        return { rows: row ? Object.values(row) : null };
       }
       case 'values':
-        return { rows: client.all(sql, params) as any[] };
+        return { rows: client.all(sql, params).map((r: any) => Object.values(r)) };
       default:
         throw new Error(`SQLite proxy: unknown method '${method}'`);
     }

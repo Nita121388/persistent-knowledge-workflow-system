@@ -1,0 +1,5 @@
+// .gitignore additions for e2e tests
+playwright/.auth/
+playwright-report/
+test-results/
+e2e.local.json
