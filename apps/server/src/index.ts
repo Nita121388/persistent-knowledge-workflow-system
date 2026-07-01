@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { initStorage } from '@pkws/storage';
+import { initStorage, getDb, schema } from '@pkws/storage';
+import { eq } from 'drizzle-orm';
 import { settingsRoutes } from './routes/settings.js';
 import { caseRoutes } from './routes/cases.js';
 import { inboxRoutes } from './routes/inbox.js';
@@ -10,11 +11,52 @@ import { jobRoutes } from './routes/jobs.js';
 import { healthRoutes } from './routes/health.js';
 import { startWorker } from './worker/index.js';
 import { initFileWatcher } from './watcher.js';
+import { startAgentRuntime, type AgentRuntime } from '@pkws/agent-runtime';
+import type { Settings } from '@pkws/shared';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Global reference so route handlers can call onUserInput
+export let agentRuntime: AgentRuntime | null = null;
+
+/**
+ * Load settings from the database (if initialized).
+ */
+async function loadSettings(): Promise<Settings | null> {
+  try {
+    const db = getDb();
+    const rows = await db.select().from(schema.settings).all();
+    if (rows.length === 0) return null;
+    const s = rows[0];
+    return {
+      vaultPath: s.vaultPath,
+      inboxPath: s.inboxPath,
+      workspacePath: s.workspacePath,
+      aiProvider: s.aiProvider as any,
+      aiBaseUrl: s.aiBaseUrl,
+      aiApiKeyConfigured: !!s.aiApiKeyEncrypted,
+      aiDefaultModel: s.aiDefaultModel,
+      aiMaxTokens: s.aiMaxTokens ?? undefined,
+      autoAnalyze: s.autoAnalyze,
+      agentRuntimeEnabled: !!s.agentRuntimeEnabled,
+      agentCliPath: s.agentCliPath || '',
+      autoDetectAgents: !!s.autoDetectAgents,
+      maxActiveSessions: s.maxActiveSessions,
+      sessionTimeoutMinutes: s.sessionTimeoutMinutes,
+      contextCompressThreshold: s.contextCompressThreshold,
+      contextKeepRecentCount: s.contextKeepRecentCount,
+      maxTokensPerSession: s.maxTokensPerSession,
+      sandboxMode: (s.sandboxMode || 'workspace-only') as any,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
 
 async function main() {
   const app = Fastify({ logger: true });
@@ -41,6 +83,29 @@ async function main() {
     initStorage(workspacePath);
     startWorker();
     initFileWatcher();
+
+    // Agent Runtime: start if enabled in settings
+    const settings = await loadSettings();
+    if (settings?.agentRuntimeEnabled) {
+      try {
+        agentRuntime = await startAgentRuntime({
+          db: getDb(),
+          workspacePath: settings.workspacePath,
+          cliPath: settings.agentCliPath || undefined,
+          maxActiveSessions: settings.maxActiveSessions,
+          sessionTimeoutMinutes: settings.sessionTimeoutMinutes,
+          contextCompressThreshold: settings.contextCompressThreshold,
+          contextKeepRecentCount: settings.contextKeepRecentCount,
+          maxTokensPerSession: settings.maxTokensPerSession,
+          sandboxMode: settings.sandboxMode,
+        });
+        console.log('[AgentRuntime] Started successfully via settings');
+      } catch (err) {
+        console.error('[AgentRuntime] Failed to start:', err);
+      }
+    } else {
+      console.log('[AgentRuntime] Disabled (not configured or not enabled)');
+    }
   } else {
     // Delete stale config.json so fresh setup creates proper DB
     try { fs.unlinkSync(configPath); } catch {}

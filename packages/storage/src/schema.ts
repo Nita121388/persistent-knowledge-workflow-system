@@ -13,6 +13,16 @@ export const settings = sqliteTable('settings', {
   aiDefaultModel: text('ai_default_model').notNull(),
   aiMaxTokens: integer('ai_max_tokens'),
   autoAnalyze: integer('auto_analyze', { mode: 'boolean' }).notNull().default(true),
+  // Agent Runtime settings
+  agentRuntimeEnabled: integer('agent_runtime_enabled', { mode: 'boolean' }).notNull().default(false),
+  agentCliPath: text('agent_cli_path').notNull().default(''),
+  autoDetectAgents: integer('auto_detect_agents', { mode: 'boolean' }).notNull().default(true),
+  maxActiveSessions: integer('max_active_sessions').notNull().default(10),
+  sessionTimeoutMinutes: integer('session_timeout_minutes').notNull().default(360),
+  contextCompressThreshold: integer('context_compress_threshold').notNull().default(20),
+  contextKeepRecentCount: integer('context_keep_recent_count').notNull().default(12),
+  maxTokensPerSession: integer('max_tokens_per_session').notNull().default(32000),
+  sandboxMode: text('sandbox_mode', { enum: ['workspace-only', 'vault-readonly', 'full'] }).notNull().default('workspace-only'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

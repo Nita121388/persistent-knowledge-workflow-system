@@ -23,6 +23,16 @@ export interface Settings {
   aiDefaultModel: string;
   aiMaxTokens?: number;
   autoAnalyze: boolean;
+  // Agent Runtime settings
+  agentRuntimeEnabled: boolean;
+  agentCliPath: string;
+  autoDetectAgents: boolean;
+  maxActiveSessions: number;
+  sessionTimeoutMinutes: number;
+  contextCompressThreshold: number;
+  contextKeepRecentCount: number;
+  maxTokensPerSession: number;
+  sandboxMode: 'workspace-only' | 'vault-readonly' | 'full';
   createdAt: string;
   updatedAt: string;
 }
@@ -37,6 +47,16 @@ export interface SettingsUpdate {
   aiDefaultModel: string;
   aiMaxTokens?: number;
   autoAnalyze: boolean;
+  // Agent Runtime settings
+  agentRuntimeEnabled?: boolean;
+  agentCliPath?: string;
+  autoDetectAgents?: boolean;
+  maxActiveSessions?: number;
+  sessionTimeoutMinutes?: number;
+  contextCompressThreshold?: number;
+  contextKeepRecentCount?: number;
+  maxTokensPerSession?: number;
+  sandboxMode?: 'workspace-only' | 'vault-readonly' | 'full';
 }
 
 export interface TestModelRequest {

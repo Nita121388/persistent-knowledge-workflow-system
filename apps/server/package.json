@@ -11,6 +11,7 @@
     "db:migrate": "tsx src/db-migrate.ts"
   },
   "dependencies": {
+    "@pkws/agent-runtime": "workspace:*",
     "@pkws/shared": "workspace:*",
     "@pkws/storage": "workspace:*",
     "@pkws/vault": "workspace:*",

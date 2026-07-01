@@ -8,7 +8,7 @@ export const anchorRoutes: FastifyPluginAsync = async (app) => {
     const { anchorId } = request.params as { anchorId: string };
     const db = getDb();
 
-    const anchor = db.select()
+    const anchor = await db.select()
       .from(schema.knowledgeAnchors)
       .where(eq(schema.knowledgeAnchors.id, anchorId))
       .get();
@@ -20,18 +20,18 @@ export const anchorRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const artifacts = db.select()
+    const artifacts = await db.select()
       .from(schema.artifacts)
       .where(eq(schema.artifacts.anchorId, anchorId))
       .all();
 
-    const caseList = db.select()
+    const caseList = await db.select()
       .from(schema.cases)
       .where(eq(schema.cases.anchorId, anchorId))
       .all();
 
     // Latest timeline events across cases
-    const latestEvents = db.select()
+    const latestEvents = await db.select()
       .from(schema.timelineEvents)
       .where(
         eq(schema.timelineEvents.caseId, caseList[0]?.id || '')

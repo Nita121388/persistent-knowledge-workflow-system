@@ -166,18 +166,21 @@ API Service 不直接执行长任务。
 
 Background Worker 是 MVP 的异步执行中心。
 
+> Phase 2 起，Agent Runtime 与 Worker 共享常驻进程，Worker 负责短周期任务（scan、apply、rollback），Agent Runtime 负责多 Case Agent 调度。详见 [agent/agent-runtime.md](agent/agent-runtime.md)。
+
 ### 6.1 Worker 任务类型
 
-| 任务 | 触发来源 | 输出 |
-| --- | --- | --- |
-| Scan Inbox | File Watcher / 手动刷新 | 新 Artifact / Case |
-| Create Case From Clip | 新 Markdown | Case Created |
-| Analyze Artifact | Case Created / Comment | Analysis Result |
-| Generate Proposal | Analysis Result | Proposal |
-| Generate Patch | 用户选择 Move / Enrich / Generate Formal Note | Patch |
-| Apply Patch | 用户批准具体 Patch | Vault 修改 + Snapshot |
-| Rollback Patch | Request Rollback | Vault 恢复 |
-| Reconcile Path | 文件路径变化 | Mapping 更新或 Need Review |
+| 任务 | 触发来源 | 输出 | 说明 |
+| --- | --- | --- | --- |
+| Scan Inbox | File Watcher / 手动刷新 | 新 Artifact / Case | |
+| Create Case From Clip | 新 Markdown | Case Created | |
+| Analyze Artifact | Case Created / Comment | Analysis Result | |
+| Generate Proposal | Analysis Result | Proposal | Phase 2 迁移到 Agent Runtime |
+| Generate Patch | 用户选择 Move / Enrich / Generate Formal Note | Patch | Phase 2 迁移到 Agent Runtime |
+| Run Agent | 用户评论 / 系统调度 | Case 状态更新 | Phase 2 新增，由 Agent Runtime 接管 |
+| Apply Patch | 用户批准具体 Patch | Vault 修改 + Snapshot | |
+| Rollback Patch | Request Rollback | Vault 恢复 | |
+| Reconcile Path | 文件路径变化 | Mapping 更新或 Need Review | |
 
 ### 6.2 Worker 原则
 
@@ -259,9 +262,13 @@ MVP 推荐默认：
 
 ### 8.4 AI 输出边界
 
-AI Gateway 只能返回结构化结果。
+MVP 阶段 AI Gateway 只能返回结构化结果，不能直接调用文件系统写 Vault。
 
-AI 不能直接调用文件系统写 Vault。
+**Phase 2 Agent Runtime 启用后**，AI 通过 CLI 子进程执行文件操作，但受以下约束：
+
+- CLI 只能在 PKWS 分配的隔离工作目录中操作
+- 对 Vault 的写入仍走 Patch → Preview → Approve → Apply 审批链
+- Agent 的任何文件修改必须在 Apply 前生成可预览的 Patch Manifest
 
 ## 9. Obsidian 集成组件
 
@@ -369,7 +376,8 @@ MVP 默认不复制 Clipper 原始笔记，也不默认生成整理后 Markdown�
 | Snapshot Engine | Worker | 创建 Apply 前快照 |
 | Rollback Engine | Worker | 回滚系统造成的修改 |
 | Settings Service | Backend | 管理配置 |
-| Memory Service | Backend / Worker | 管理 Case Instruction Summary、Workspace Rules，并为 AI Proposal 提供记忆上下文 |
+| Memory Service | Backend / Worker | 管理 Case Instruction Summary、Workspace Rules，并为 AI 提供记忆上下文 |
+| Agent Runtime | Worker（常驻） | Phase 2 新增。常驻进程，内存中维护多 Case 上下文，调度本地 CLI 执行 Agent 任务。详见 [agent/agent-runtime.md](agent/agent-runtime.md) |
 
 ## 12. MVP 必做模块
 
@@ -394,6 +402,8 @@ MVP 默认不复制 Clipper 原始笔记，也不默认生成整理后 Markdown�
 17. Snapshot / Rollback Engine。
 
 第二阶段再做：
+
+18. Agent Runtime（常驻 Agent 调度 + 多 Case 上下文管理）
 
 1. Obsidian Companion Plugin。
 2. PKWS Browser Companion。

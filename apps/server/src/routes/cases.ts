@@ -4,6 +4,7 @@ import { eq, desc, like, inArray, and } from 'drizzle-orm';
 import { CommentRequestSchema, ReopenRequestSchema, type CaseStatus } from '@pkws/shared';
 import type { CaseDetail, CaseListItem } from '@pkws/shared';
 import { genEventId } from '@pkws/shared/utils.js';
+import { agentRuntime } from '../index.js';
 
 export const caseRoutes: FastifyPluginAsync = async (app) => {
   // GET /cases — list cases with optional filters
@@ -42,7 +43,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
 
     const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const rows = db.select()
+    const rows = await db.select()
       .from(schema.cases)
       .where(where)
       .orderBy(desc(schema.cases.updatedAt))
@@ -63,7 +64,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     // Fetch vault paths
     const anchorIds = [...new Set(items.map(i => i.anchorId))];
     if (anchorIds.length > 0) {
-      const anchors = db.select()
+      const anchors = await db.select()
         .from(schema.knowledgeAnchors)
         .where(inArray(schema.knowledgeAnchors.id, anchorIds))
         .all();
@@ -81,7 +82,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const { caseId } = request.params as { caseId: string };
     const db = getDb();
 
-    const caseRow = db.select()
+    const caseRow = await db.select()
       .from(schema.cases)
       .where(eq(schema.cases.id, caseId))
       .get();
@@ -93,17 +94,17 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const anchor = db.select()
+    const anchor = await db.select()
       .from(schema.knowledgeAnchors)
       .where(eq(schema.knowledgeAnchors.id, caseRow.anchorId))
       .get();
 
-    const artifact = db.select()
+    const artifact = await db.select()
       .from(schema.artifacts)
       .where(eq(schema.artifacts.id, caseRow.primaryArtifactId))
       .get();
 
-    const timeline = db.select()
+    const timeline = await db.select()
       .from(schema.timelineEvents)
       .where(eq(schema.timelineEvents.caseId, caseId))
       .orderBy(desc(schema.timelineEvents.createdAt))
@@ -112,26 +113,34 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
 
     let currentProposal = undefined;
     if (caseRow.currentProposalId) {
-      currentProposal = db.select()
+      const raw = await db.select()
         .from(schema.proposals)
         .where(eq(schema.proposals.id, caseRow.currentProposalId))
         .get() as any;
+      if (raw) {
+        currentProposal = {
+          ...raw,
+          suggestedActions: typeof raw.suggestedActions === 'string' ? JSON.parse(raw.suggestedActions) : raw.suggestedActions,
+          risks: raw.risks ? (typeof raw.risks === 'string' ? JSON.parse(raw.risks) : raw.risks) : undefined,
+          requiresPatch: !!raw.requiresPatch,
+        };
+      }
     }
 
     let currentPatch = undefined;
     if (caseRow.currentPatchId) {
-      currentPatch = db.select()
+      currentPatch = await db.select()
         .from(schema.patchManifests)
         .where(eq(schema.patchManifests.id, caseRow.currentPatchId))
         .get() as any;
     }
 
-    const instructionSummary = db.select()
+    const instructionSummary = await db.select()
       .from(schema.caseInstructionSummaries)
       .where(eq(schema.caseInstructionSummaries.caseId, caseId))
       .get() as any;
 
-    const patchIntents = db.select()
+    const patchIntents = await db.select()
       .from(schema.patchIntents)
       .where(eq(schema.patchIntents.caseId, caseId))
       .orderBy(desc(schema.patchIntents.createdAt))
@@ -178,7 +187,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
 
     // Update instruction summary if requested
     if (updateInstructionSummary) {
-      const existing = db.select()
+      const existing = await db.select()
         .from(schema.caseInstructionSummaries)
         .where(eq(schema.caseInstructionSummaries.caseId, caseId))
         .get();
@@ -205,7 +214,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       }
     }
 
-    // Update case status and create regeneration job
+    // Update case status and create regeneration job, or route to Agent Runtime
     db.update(schema.cases)
       .set({
         status: 'NeedDiscussion',
@@ -214,13 +223,46 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       .where(eq(schema.cases.id, caseId))
       .run();
 
+    // If Agent Runtime is active, route the input there instead of via job queue
+    if (agentRuntime) {
+      // Load workspace rules and case instructions to pass to Agent Runtime
+      const rules = await db.select()
+        .from(schema.workspaceRules)
+        .where(eq(schema.workspaceRules.enabled, true))
+        .orderBy(schema.workspaceRules.priority)
+        .all();
+
+      const instructionSummary = await db.select()
+        .from(schema.caseInstructionSummaries)
+        .where(eq(schema.caseInstructionSummaries.caseId, caseId))
+        .get();
+
+      // Get the case to pass system context
+      const caseRow = await db.select()
+        .from(schema.cases)
+        .where(eq(schema.cases.id, caseId))
+        .get();
+
+      // Enqueue the case in the Agent Runtime
+      agentRuntime.enqueueCase(caseId, {
+        workspaceRules: rules,
+        caseInstructions: instructionSummary?.summary || '',
+      });
+
+      // Pass the user input to the scheduler
+      agentRuntime.onUserInput(caseId, comment);
+
+      return { ok: true, data: { success: true, mode: 'agent-runtime' } };
+    }
+
+    // Fallback: use the existing job queue path
     const { createJob } = await import('../worker/job-queue.js');
     await createJob({
       type: 'generate_proposal',
-      payload: { caseId, reason: 'user_comment' },
+      payload: { caseId, reason: 'user_comment', comment },
     });
 
-    return { ok: true, data: { success: true } };
+    return { ok: true, data: { success: true, mode: 'job-queue' } };
   });
 
   // POST /cases/:caseId/mark-done
@@ -362,7 +404,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const { caseId } = request.params as { caseId: string };
     const db = getDb();
 
-    const proposals = db.select()
+    const proposals = await db.select()
       .from(schema.proposals)
       .where(eq(schema.proposals.caseId, caseId))
       .orderBy(desc(schema.proposals.createdAt))
@@ -376,7 +418,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const { caseId } = request.params as { caseId: string };
     const db = getDb();
 
-    const intents = db.select()
+    const intents = await db.select()
       .from(schema.patchIntents)
       .where(eq(schema.patchIntents.caseId, caseId))
       .orderBy(desc(schema.patchIntents.createdAt))
@@ -390,7 +432,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const { patchId } = request.params as { patchId: string };
     const db = getDb();
 
-    const patch = db.select()
+    const patch = await db.select()
       .from(schema.patchManifests)
       .where(eq(schema.patchManifests.id, patchId))
       .get() as any;
@@ -454,7 +496,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const { caseId, patchId } = request.params as { caseId: string; patchId: string };
     const db = getDb();
 
-    const patch = db.select()
+    const patch = await db.select()
       .from(schema.patchManifests)
       .where(eq(schema.patchManifests.id, patchId))
       .get();
@@ -508,7 +550,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const db = getDb();
 
     // Find the latest apply manifest for this case
-    const apply = db.select()
+    const apply = await db.select()
       .from(schema.applyManifests)
       .where(eq(schema.applyManifests.caseId, caseId))
       .orderBy(desc(schema.applyManifests.appliedAt))
@@ -556,7 +598,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     const { caseId } = request.params as { caseId: string };
     const db = getDb();
 
-    const events = db.select()
+    const events = await db.select()
       .from(schema.timelineEvents)
       .where(eq(schema.timelineEvents.caseId, caseId))
       .orderBy(desc(schema.timelineEvents.createdAt))

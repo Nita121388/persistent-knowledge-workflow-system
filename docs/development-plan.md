@@ -1,9 +1,9 @@
 # 持续知识工作流系统开发计划
 
-> 版本：v0.2
+> 版本：v0.3
 > 状态：开发计划草案
-> 阶段：MVP 实施规划
-> 更新日期：2026-06-27
+> 阶段：MVP 实施规划 + Phase 2 预留
+> 更新日期：2026-07-01
 
 ## 1. 开发目标
 
@@ -54,7 +54,11 @@ MVP 的核心成功标准：
 无自动 Apply
 无自动长期记忆学习
 无向量数据库
+无内建 Agent Runtime（依赖本地 CLI）
+无 Agent Runtime 常驻进程（Worker 做完 Job 可退出）
 ```
+
+> Phase 2 引入 Agent Runtime 时（参见 [agent/agent-runtime.md](agent/agent-runtime.md)），需放开"单 AI Provider"约束以支持外部 CLI 作为独立 Agent 后端，同时放开"Worker 做完 Job 退出"约束为常驻 Agent Runtime 进程。
 
 ### 2.2 MVP 内容流约束
 
@@ -453,6 +457,66 @@ Rollback 触发率
 - 至少 5 条真实网页收藏完成闭环。
 - 记录主要失败原因和下一轮优化点。
 
+---
+
+## 10. Phase 2：Agent Runtime 路线图
+
+参考设计：[agent/agent-runtime.md](agent/agent-runtime.md)
+
+### 短期优化：Worker 常驻 + 内存上下文（0.5 天）
+
+在现有 Worker 基础上增加内存缓存，不改架构。
+
+任务：
+
+1. Worker 启动后不退出，进入 wait loop。
+2. 内存中维护 `Map<caseId, Message[]>`。
+3. 同一 Case 的连续调用共享消息历史。
+4. 简单的 LRU eviction（超过 N 个 Case 时淘汰最久未活跃的）。
+
+完成标准：
+
+- 用户评论后，AI 知道之前说过什么。
+- 连续 3 次评论同一个 Case，上下文累积，不丢失。
+
+### M10.1：Agent Runtime Phase 1（3-5 天）
+
+任务：
+
+1. 创建 `packages/agent-runtime/` 包。
+2. `CaseSession` 类型 + 内存管理（Map + eviction）。
+3. `context-builder`：从 messages 构建 CLAUDE.md。
+4. `cli-runner`：spawn CLI（Codex / Claude Code）+ 读取输出。
+5. `scheduler`：优先级队列 + decideAction（continue / new_turn / compress）。
+6. Settings 增加 Agent Runtime 配置项（主开关 + CLI 路径 + 资源限制）。
+7. 集成到 Server：startAgentRuntime + onUserInput。
+
+完成标准：
+
+- Agent Runtime 进程常驻，多个 Case 的内存上下文共存。
+- 用户评论 → 内存中追加 → CLI 子进程执行 → 输出更新 Case。
+- 用户可通过配置开关 Agent Runtime。
+
+### M10.2：Agent Runtime Phase 2（3-5 天）
+
+任务：
+
+1. 上下文压缩：消息 > 阈值时折叠旧消息。
+2. 暂停/恢复：`awaitingUserInput` + waitQueue。
+3. SQLite 持久化：eviction 时序列化，恢复时反序列化。
+4. 多 Case 调度：并发活跃 Case 的优先级管理。
+5. 输出解析：proposal.json / patch-operations.json 的 Zod 校验。
+6. Settings 增加上下文管理配置项。
+
+完成标准：
+
+- 超过 20 轮交互后自动压缩上下文。
+- Agent 等用户时不空转 LLM。
+- 进程崩溃重启后，活跃 Case 从 SQLite 恢复。| 版本 | 日期 | 说明 |
+|------|------|------|
+| v0.2 | 2026-06-27 | MVP 初始版本 |
+| v0.3 | 2026-07-01 | 增加 Phase 2 Agent Runtime 路线图 |
+
 ## 5. 初始数据模型清单
 
 第一版需要这些对象：
@@ -512,7 +576,16 @@ Jobs
 -> 真实试跑
 ```
 
-不要提前做：
+### MVP 后建议
+
+```text
+-> Agent Runtime Phase 1（常驻进程 + 内存上下文 + CLI 调用）
+   ├─ 短期（0.5 天）：Worker 常驻 + 内存 Map<caseId, messages>
+   ├─ Phase 1（3-5 天）：CaseSession + context-builder + cli-runner + scheduler
+   └─ Phase 2（3-5 天）：上下文压缩 + SQLite 持久化 + eviction 恢复
+```
+
+详见 [agent/agent-runtime.md](agent/agent-runtime.md)。不要提前做：
 
 - Electron。
 - Obsidian 插件。
@@ -521,6 +594,7 @@ Jobs
 - 自动长期记忆。
 - 向量数据库。
 - 复杂工作流平台。
+- Agent Runtime（详见 Milestone 10）。
 
 ## 8. 第一轮开发风险
 

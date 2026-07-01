@@ -178,9 +178,9 @@ updated_at
 AI 生成 Proposal 前读取：
 
 ```text
-Artifact
-Case Instruction Summary
-Workspace Rules
+Global Memory（Workspace Rules）
+Case Memory（文件路径 + 用户批注）
+Case Instruction Summary（可选）
 ```
 
 Prompt 中必须明确：
@@ -189,6 +189,52 @@ Prompt 中必须明确：
 Workspace Rules 是用户长期偏好，优先遵守。
 Case Instruction Summary 是当前 Case 的具体指示，如果与 Workspace Rules 冲突，以 Case 指示为准。
 ```
+
+### 5.5 AI 输入设计（v0.2+）
+
+#### 设计原则
+
+AI 不应接收笔记全文，只接收最小必要信息以降低 Token 消耗并聚焦用户意图。
+
+#### 收藏场景的 AI 输入结构
+
+| 模块 | 内容 | 来源 |
+|------|------|------|
+| **Global Memory** | 用户长期偏好、知识分类体系 | Workspace Rules |
+| **Case Memory** | 文件路径 + 用户批注 | 笔记文件路径 + Rules 声明中定义的批注来源属性 |
+| **Workspace Rules** | 全局偏好 + 批注字段声明 | Rules 表 |
+
+示例 Prompt：
+
+```
+## File Path
+E:/File/.../Clippings/Superpowers.md
+
+## User Annotations
+整理到合适的位置
+
+## Workspace Rules
+[批注字段声明] 用户在 Clippings 的 frontmatter 中
+可能使用"想法|描述"等属性记录初步想法，请参考。
+[其他规则] ...
+```
+
+批注来源字段不由代码硬编码，而是用户在 Workspace Rules 中声明。
+
+#### 后续交互场景的 AI 输入结构
+
+| 模块 | 内容 |
+|------|------|
+| **Global Memory** | Workspace Rules（同上） |
+| **Case Memory** | 文件路径 + 原始批注 + 历史评论批注元数据 + 本次新批注 |
+| **Instructions** | Case Instruction Summary |
+
+#### Token 优化策略
+
+- 不传笔记正文全文
+- 只传文件路径让 AI 知晓内容定位
+- 只传用户批注（来自 frontmatter 指定属性）传达用户意图
+- 正文超过 3000 字时只传前 2000 字摘要
 
 ## 6. Learned Memory
 

@@ -15,7 +15,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   app.get('/settings', async (request, reply) => {
     try {
       const db = getDb();
-      const rows = db.select().from(schema.settings).all();
+      const rows = await db.select().from(schema.settings).all();
       if (rows.length === 0) {
         return reply.status(404).send({
           ok: false,
@@ -35,6 +35,16 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
           aiDefaultModel: s.aiDefaultModel,
           aiMaxTokens: s.aiMaxTokens,
           autoAnalyze: s.autoAnalyze,
+          // Agent Runtime
+          agentRuntimeEnabled: !!s.agentRuntimeEnabled,
+          agentCliPath: s.agentCliPath || '',
+          autoDetectAgents: !!s.autoDetectAgents,
+          maxActiveSessions: s.maxActiveSessions,
+          sessionTimeoutMinutes: s.sessionTimeoutMinutes,
+          contextCompressThreshold: s.contextCompressThreshold,
+          contextKeepRecentCount: s.contextKeepRecentCount,
+          maxTokensPerSession: s.maxTokensPerSession,
+          sandboxMode: s.sandboxMode || 'workspace-only',
           createdAt: s.createdAt,
           updatedAt: s.updatedAt,
         },
@@ -106,7 +116,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
     try {
       const db = getDb();
-      const existing = db.select().from(schema.settings).all();
+      const existing = await db.select().from(schema.settings).all();
 
       if (existing.length > 0) {
         db.update(schema.settings)
@@ -120,6 +130,16 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
             aiDefaultModel: data.aiDefaultModel,
             aiMaxTokens: data.aiMaxTokens ?? null,
             autoAnalyze: data.autoAnalyze,
+            // Agent Runtime settings
+            agentRuntimeEnabled: data.agentRuntimeEnabled ?? existing[0].agentRuntimeEnabled,
+            agentCliPath: data.agentCliPath ?? existing[0].agentCliPath,
+            autoDetectAgents: data.autoDetectAgents ?? existing[0].autoDetectAgents,
+            maxActiveSessions: data.maxActiveSessions ?? existing[0].maxActiveSessions,
+            sessionTimeoutMinutes: data.sessionTimeoutMinutes ?? existing[0].sessionTimeoutMinutes,
+            contextCompressThreshold: data.contextCompressThreshold ?? existing[0].contextCompressThreshold,
+            contextKeepRecentCount: data.contextKeepRecentCount ?? existing[0].contextKeepRecentCount,
+            maxTokensPerSession: data.maxTokensPerSession ?? existing[0].maxTokensPerSession,
+            sandboxMode: data.sandboxMode ?? existing[0].sandboxMode,
             updatedAt: now,
           })
           .where(eq(schema.settings.id, existing[0].id))
@@ -136,6 +156,16 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
           aiDefaultModel: data.aiDefaultModel,
           aiMaxTokens: data.aiMaxTokens ?? null,
           autoAnalyze: data.autoAnalyze,
+          // Agent Runtime settings (defaults)
+          agentRuntimeEnabled: data.agentRuntimeEnabled ?? false,
+          agentCliPath: data.agentCliPath ?? '',
+          autoDetectAgents: data.autoDetectAgents ?? true,
+          maxActiveSessions: data.maxActiveSessions ?? 10,
+          sessionTimeoutMinutes: data.sessionTimeoutMinutes ?? 360,
+          contextCompressThreshold: data.contextCompressThreshold ?? 20,
+          contextKeepRecentCount: data.contextKeepRecentCount ?? 12,
+          maxTokensPerSession: data.maxTokensPerSession ?? 32000,
+          sandboxMode: data.sandboxMode ?? 'workspace-only',
           createdAt: now,
           updatedAt: now,
         }).run();

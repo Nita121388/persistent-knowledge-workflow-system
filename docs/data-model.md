@@ -109,6 +109,7 @@ Workspace 1 -> N WorkspaceRule
 | Patch Manifest | `patch_` | `patch_20260627_001` | 可执行变更集合 |
 | Apply Manifest | `apply_` | `apply_20260627_001` | 已执行变更记录 |
 | Job | `job_` | `job_20260627_001` | 后台任务 |
+| Agent Session | `as_` | `as_20260701_001` | Phase 2。CaseSession 持久化快照，用于 Agent Runtime 的 eviction 恢复 |
 
 ID 要求：
 

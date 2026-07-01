@@ -104,9 +104,10 @@ Obsidian 侧 MVP 先不强制开发完整伴侣插件，但架构预留 Obsidian
 | Obsidian Web Clipper | 必需 | 浏览器侧网页捕获、内容提取、生成 Markdown |
 | PKWS Web Console | 必需 | Case 列表、详情、Proposal、Patch、审批、回滚、设置 |
 | PKWS Local Backend API Service | 必需 | 为前端和集成入口提供统一 API |
-| PKWS Background Worker | 必需 | 异步执行 AI 分析、Proposal 生成、按需 Patch、Apply、Rollback |
+| PKWS Background Worker | 必需 | 异步执行 AI 分析、Proposal 生成、按需 Patch、Apply、Rollback；与 Agent Runtime 共享进程，Agent Runtime 负责多 Case 调度和上下文管理 |
 | PKWS File Watcher | 必需 | 监听 Vault Inbox，发现 Clipper 新笔记 |
 | PKWS AI Gateway | 必需 | 管理 AI Provider、模型、Key、调用策略 |
+| PKWS Agent Runtime | Phase 2 | 常驻 Agent 调度器，管理多 Case 上下文，调用本地 CLI 执行 Agent 任务（详见 [agent/agent-runtime.md](agent/agent-runtime.md)） |
 | PKWS Workspace Store | 必需 | 保存 Case、事件、Anchor、配置、Proposal、Patch |
 | PKWS Staging Store | 可选 | 仅在用户要求生成内容 Patch 时保存草稿和预览内容 |
 | PKWS Snapshot Store | 必需 | 保存 Apply 前快照与回滚 Manifest |

@@ -14,9 +14,11 @@ interface ProposalInput {
   title: string;
   contentBody: string;
   sourceUrl?: string;
+  frontmatterContext?: string;
   frontmatterTags?: string;
   instructionSummary?: string;
   workspaceRules?: string;
+  conversationHistory?: string;
 }
 
 const SYSTEM_PROMPT = `You are a knowledge curation assistant. Your job is to analyze a web clip or note and provide a structured proposal for how to handle it.
@@ -51,6 +53,9 @@ function buildUserPrompt(input: ProposalInput): string {
   if (input.workspaceRules) {
     parts.push(`\n## Workspace Rules (user's long-term preferences)\n${input.workspaceRules}`);
   }
+  if (input.conversationHistory) {
+    parts.push(`\n## Conversation History (previous analysis and feedback)\n${input.conversationHistory}`);
+  }
 
   parts.push(`\n## Output
 Generate a structured proposal for how to handle this content. Be specific about what action(s) to take and why.`);
@@ -67,12 +72,21 @@ export async function testModel(config: AiConfig): Promise<{ model: string; late
   const model = provider.languageModel(config.defaultModel);
   const start = Date.now();
 
-  await generateObject({
+  // Use generateText with a JSON prompt instead of generateObject,
+  // because some OpenAI-compatible APIs don't support structured output / json_schema mode.
+  const { generateText } = await import('ai');
+  const result = await generateText({
     model,
-    schema: (z: any) => z.object({ ok: z.boolean() }),
-    prompt: 'Respond with { "ok": true }',
-    maxTokens: 50,
+    prompt: 'Respond with JSON: { "ok": true }. Output ONLY the JSON.',
+    maxTokens: 100,
   });
+
+  // Try to parse the result to verify it's valid JSON
+  try {
+    JSON.parse(result.text);
+  } catch {
+    throw new Error(`Model returned invalid JSON response: ${result.text.slice(0, 100)}`);
+  }
 
   return {
     model: config.defaultModel,

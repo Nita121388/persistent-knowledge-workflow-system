@@ -15,7 +15,7 @@ export async function createJob(params: CreateJobParams): Promise<Job> {
 
   // Check idempotency
   if (params.idempotencyKey) {
-    const existing = db.select()
+    const existing = await db.select()
       .from(schema.jobs)
       .where(eq(schema.jobs.idempotencyKey, params.idempotencyKey))
       .get();
@@ -51,9 +51,9 @@ const runningJobs = new Set<string>();
 export async function processNextJob(): Promise<boolean> {
   const db = getDb();
 
-  const job = db.transaction((tx) => {
+  const job = await db.transaction(async (tx) => {
     // Find next queued job
-    const next = tx.select()
+    const next = await tx.select()
       .from(schema.jobs)
       .where(eq(schema.jobs.status, 'queued'))
       .orderBy(schema.jobs.createdAt)
@@ -113,7 +113,7 @@ export async function processNextJob(): Promise<boolean> {
 
 export async function isJobPending(caseId: string, type: JobType): Promise<boolean> {
   const db = getDb();
-  const existing = db.select()
+  const existing = await db.select()
     .from(schema.jobs)
     .where(
       and(

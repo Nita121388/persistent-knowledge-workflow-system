@@ -11,6 +11,79 @@ import type { Settings, KnowledgeAnchor } from '@pkws/shared';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// 短期优化：Worker 常驻 + 内存 Case 上下文
+// 在进程内存中维护 Case 的对话历史，避免每次从零重建
+// 参考 docs/agent/agent-runtime.md §2.1 / §10 短期优化
+interface ConversationContext {
+  caseId: string;
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp: string }>;
+  turnCount: number;
+  compressedSummary: string | null;
+  lastActiveAt: number;
+}
+
+const MAX_CONTEXTS = 20;
+const EVICT_AFTER_MS = 6 * 60 * 60 * 1000; // 6 小时
+const COMPRESS_THRESHOLD = 20; // 消息数超过此值触发压缩
+const KEEP_RECENT = 12; // 压缩后保留最近的消息数
+
+const caseContexts = new Map<string, ConversationContext>();
+
+function getOrCreateContext(caseId: string): ConversationContext {
+  let ctx = caseContexts.get(caseId);
+  if (!ctx) {
+    ctx = {
+      caseId,
+      messages: [],
+      turnCount: 0,
+      compressedSummary: null,
+      lastActiveAt: Date.now(),
+    };
+    caseContexts.set(caseId, ctx);
+  }
+  ctx.lastActiveAt = Date.now();
+  return ctx;
+}
+
+function evictStaleContexts() {
+  if (caseContexts.size <= MAX_CONTEXTS) return;
+  const entries = [...caseContexts.entries()]
+    .filter(([_, ctx]) => Date.now() - ctx.lastActiveAt > EVICT_AFTER_MS)
+    .sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt);
+  const toEvict = entries.slice(0, caseContexts.size - MAX_CONTEXTS);
+  for (const [caseId] of toEvict) {
+    caseContexts.delete(caseId);
+  }
+}
+
+function appendToContext(ctx: ConversationContext, role: 'user' | 'assistant' | 'system', content: string) {
+  ctx.messages.push({ role, content, timestamp: new Date().toISOString() });
+  ctx.turnCount++;
+  ctx.lastActiveAt = Date.now();
+
+  // 超过阈值时压缩
+  if (ctx.messages.length > COMPRESS_THRESHOLD) {
+    const oldMessages = ctx.messages.slice(0, -KEEP_RECENT);
+    ctx.compressedSummary = `Previous ${oldMessages.length} messages compressed. Summary: ${oldMessages.map(m => `[${m.role}]: ${m.content.slice(0, 100)}`).join('; ')}`;
+    ctx.messages = ctx.messages.slice(-KEEP_RECENT);
+  }
+}
+
+function buildContextPrompt(ctx: ConversationContext, currentInput: string): string {
+  const parts: string[] = [];
+  if (ctx.compressedSummary) {
+    parts.push(`## Conversation History Summary\n${ctx.compressedSummary}\n`);
+  }
+  if (ctx.messages.length > 0) {
+    parts.push('## Recent Conversation\n');
+    for (const msg of ctx.messages) {
+      parts.push(`${msg.role === 'user' ? 'Human' : 'Assistant'}: ${msg.content}`);
+    }
+  }
+  parts.push(`\n## Current Input\n${currentInput}`);
+  return parts.join('\n');
+}
+
 export async function handleJob(job: Job) {
   switch (job.type) {
     case 'scan_inbox':
@@ -36,7 +109,7 @@ export async function handleJob(job: Job) {
 
 async function getSettings(): Promise<Settings> {
   const db = getDb();
-  const row = db.select().from(schema.settings).get();
+  const row = await db.select().from(schema.settings).get();
   if (!row) throw new Error('Settings not configured');
   return {
     vaultPath: row.vaultPath,
@@ -48,6 +121,15 @@ async function getSettings(): Promise<Settings> {
     aiDefaultModel: row.aiDefaultModel,
     aiMaxTokens: row.aiMaxTokens ?? undefined,
     autoAnalyze: row.autoAnalyze,
+    agentRuntimeEnabled: !!row.agentRuntimeEnabled,
+    agentCliPath: row.agentCliPath || '',
+    autoDetectAgents: !!row.autoDetectAgents,
+    maxActiveSessions: row.maxActiveSessions,
+    sessionTimeoutMinutes: row.sessionTimeoutMinutes,
+    contextCompressThreshold: row.contextCompressThreshold,
+    contextKeepRecentCount: row.contextKeepRecentCount,
+    maxTokensPerSession: row.maxTokensPerSession,
+    sandboxMode: (row.sandboxMode || 'workspace-only') as any,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -59,7 +141,7 @@ async function handleScanInbox(job: Job) {
 
   // Configure AI if available
   if (settings.aiApiKeyConfigured && settings.aiBaseUrl) {
-    const settingRow = db.select().from(schema.settings).get();
+    const settingRow = await db.select().from(schema.settings).get();
     if (settingRow?.aiApiKeyEncrypted) {
       const { setAiConfig } = await import('@pkws/ai');
       setAiConfig({
@@ -89,20 +171,13 @@ async function handleScanInbox(job: Job) {
       // Write pkws_id to file
       const written = await writePkwsId(filePath, anchorId);
       if (written) {
-        db.insert(schema.timelineEvents).values({
-          id: genEventId(),
-          caseId: '',  // Will be set after case creation
-          type: 'pkws_id_written',
-          actor: 'system',
-          summary: `Written pkws_id: ${anchorId}`,
-          dataJson: JSON.stringify({ filePath }),
-          createdAt: new Date().toISOString(),
-        }).run();
+        // Skip timeline event for pkws_id write since we don't have a case yet
+        console.log(`  ✓ pkws_id written to ${path.basename(filePath)}`);
       }
     }
 
     // Create anchor if not exists
-    const existingAnchor = db.select()
+    const existingAnchor = await db.select()
       .from(schema.knowledgeAnchors)
       .where(eq(schema.knowledgeAnchors.id, anchorId))
       .get();
@@ -131,7 +206,7 @@ async function handleScanInbox(job: Job) {
 
     // Check if there's already a pending case for this anchor
     const pendingStatuses = ['Captured', 'Analyzing', 'ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved', 'Applying'];
-    const existingCase = db.select()
+    const existingCase = await db.select()
       .from(schema.cases)
       .where(
         and(
@@ -210,21 +285,34 @@ async function handleWritePkwsId(job: Job) {
 async function handleGenerateProposal(job: Job) {
   const payload = JSON.parse(job.payloadJson);
   const { caseId } = payload;
+  const userComment = payload.comment as string | undefined;
   const db = getDb();
 
-  const caseRow = db.select()
+  // Ensure AI is configured
+  const sRow = await db.select().from(schema.settings).get();
+  if (sRow?.aiApiKeyEncrypted && sRow.aiBaseUrl) {
+    const { setAiConfig } = await import('@pkws/ai');
+    setAiConfig({
+      baseUrl: sRow.aiBaseUrl,
+      apiKey: sRow.aiApiKeyEncrypted,
+      defaultModel: sRow.aiDefaultModel,
+      maxTokens: sRow.aiMaxTokens ?? undefined,
+    });
+  }
+
+  const caseRow = await db.select()
     .from(schema.cases)
     .where(eq(schema.cases.id, caseId))
     .get();
   if (!caseRow) throw new Error(`Case not found: ${caseId}`);
 
-  const artifact = db.select()
+  const artifact = await db.select()
     .from(schema.artifacts)
     .where(eq(schema.artifacts.id, caseRow.primaryArtifactId))
     .get();
   if (!artifact) throw new Error(`Artifact not found: ${caseRow.primaryArtifactId}`);
 
-  const anchor = db.select()
+  const anchor = await db.select()
     .from(schema.knowledgeAnchors)
     .where(eq(schema.knowledgeAnchors.id, caseRow.anchorId))
     .get();
@@ -234,21 +322,23 @@ async function handleGenerateProposal(job: Job) {
   if (!md) throw new Error(`Cannot read file: ${artifact.vaultPath}`);
 
   // Check instruction summary
-  const instructionSummary = db.select()
+  const instructionSummary = await db.select()
     .from(schema.caseInstructionSummaries)
     .where(eq(schema.caseInstructionSummaries.caseId, caseId))
     .get();
 
   // Check workspace rules
-  const rules = db.select()
+  const rules = await db.select()
     .from(schema.workspaceRules)
     .where(eq(schema.workspaceRules.enabled, true))
     .orderBy(schema.workspaceRules.priority)
     .all();
 
-  const tagsStr = md.data.tags ? JSON.stringify(md.data.tags) : undefined;
+  const frontmatterStr = md.data && Object.keys(md.data).length > 0
+    ? JSON.stringify(md.data, null, 2)
+    : undefined;
 
-  // Call AI
+  // Call AI — with memory context
   db.insert(schema.timelineEvents).values({
     id: genEventId(),
     caseId,
@@ -258,17 +348,32 @@ async function handleGenerateProposal(job: Job) {
     createdAt: new Date().toISOString(),
   }).run();
 
+  // 短期优化：从内存上下文读取历史，构建带历史的 prompt
+  const ctx = getOrCreateContext(caseId);
+
+  // 如果有用户的 comment，记录到上下文
+  if (userComment) {
+    appendToContext(ctx, 'user', userComment);
+  }
+
   const proposal = await generateProposal(
     {
       title: artifact.title || 'Untitled',
       contentBody: md.body,
       sourceUrl: artifact.sourceUrl,
-      frontmatterTags: tagsStr,
+      frontmatterContext: frontmatterStr,
       instructionSummary: instructionSummary?.summary,
       workspaceRules: rules.map(r => `[${r.title}] ${r.content}`).join('\n'),
+      conversationHistory: ctx.messages.length > 0
+        ? buildContextPrompt(ctx, '')
+        : undefined,
     },
     caseId,
   );
+
+  // 记录到内存上下文
+  appendToContext(ctx, 'user', `Generate proposal for: ${artifact.title}`);
+  appendToContext(ctx, 'assistant', `Proposal generated: ${proposal.title} — ${proposal.reasoningSummary?.slice(0, 200)}`);
 
   // Save proposal
   db.insert(schema.proposals).values({
@@ -313,13 +418,25 @@ async function handleGeneratePatch(job: Job) {
   const { caseId, patchIntentId, action } = payload;
   const db = getDb();
 
-  const caseRow = db.select()
+  // Ensure AI is configured
+  const sRow = await db.select().from(schema.settings).get();
+  if (sRow?.aiApiKeyEncrypted && sRow.aiBaseUrl) {
+    const { setAiConfig } = await import('@pkws/ai');
+    setAiConfig({
+      baseUrl: sRow.aiBaseUrl,
+      apiKey: sRow.aiApiKeyEncrypted,
+      defaultModel: sRow.aiDefaultModel,
+      maxTokens: sRow.aiMaxTokens ?? undefined,
+    });
+  }
+
+  const caseRow = await db.select()
     .from(schema.cases)
     .where(eq(schema.cases.id, caseId))
     .get();
   if (!caseRow) throw new Error(`Case not found: ${caseId}`);
 
-  const artifact = db.select()
+  const artifact = await db.select()
     .from(schema.artifacts)
     .where(eq(schema.artifacts.id, caseRow.primaryArtifactId))
     .get();
@@ -328,18 +445,18 @@ async function handleGeneratePatch(job: Job) {
   const md = await readMarkdown(artifact.vaultPath);
   if (!md) throw new Error('Cannot read artifact file');
 
-  const instructionSummary = db.select()
+  const instructionSummary = await db.select()
     .from(schema.caseInstructionSummaries)
     .where(eq(schema.caseInstructionSummaries.caseId, caseId))
     .get();
 
-  const rules = db.select()
+  const rules = await db.select()
     .from(schema.workspaceRules)
     .where(eq(schema.workspaceRules.enabled, true))
     .orderBy(schema.workspaceRules.priority)
     .all();
 
-  const pi = db.select()
+  const pi = await db.select()
     .from(schema.patchIntents)
     .where(eq(schema.patchIntents.id, patchIntentId))
     .get();
@@ -411,7 +528,7 @@ async function handleApplyPatch(job: Job) {
   const db = getDb();
   const settings = await getSettings();
 
-  const patch = db.select()
+  const patch = await db.select()
     .from(schema.patchManifests)
     .where(eq(schema.patchManifests.id, patchManifestId))
     .get();
@@ -497,7 +614,7 @@ async function handleRollbackApply(job: Job) {
   const db = getDb();
   const settings = await getSettings();
 
-  const applyManifest = db.select()
+  const applyManifest = await db.select()
     .from(schema.applyManifests)
     .where(eq(schema.applyManifests.id, applyManifestId))
     .get();
@@ -525,7 +642,7 @@ async function handleRollbackApply(job: Job) {
         .run();
     }
 
-    const caseRow = db.select()
+    const caseRow = await db.select()
       .from(schema.cases)
       .where(eq(schema.cases.id, caseId))
       .get();

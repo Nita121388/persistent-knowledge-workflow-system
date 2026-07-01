@@ -7,7 +7,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     const { jobId } = request.params as { jobId: string };
     const db = getDb();
 
-    const job = db.select()
+    const job = await db.select()
       .from(schema.jobs)
       .where(eq(schema.jobs.id, jobId))
       .get();
@@ -26,16 +26,21 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     const db = getDb();
     const query = request.query as Record<string, string>;
 
-    let result = db.select()
-      .from(schema.jobs)
-      .orderBy(schema.jobs.createdAt)
-      .limit(50);
-
+    let rows;
     if (query.status) {
-      result = result.where(eq(schema.jobs.status, query.status as any));
+      rows = await db.select()
+        .from(schema.jobs)
+        .where(eq(schema.jobs.status, query.status as any))
+        .orderBy(schema.jobs.createdAt)
+        .limit(50)
+        .all() as any;
+    } else {
+      rows = await db.select()
+        .from(schema.jobs)
+        .orderBy(schema.jobs.createdAt)
+        .limit(50)
+        .all() as any;
     }
-
-    const rows = result.all() as any;
     return { ok: true, data: rows };
   });
 };

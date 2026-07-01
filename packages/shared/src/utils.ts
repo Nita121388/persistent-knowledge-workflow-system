@@ -56,6 +56,16 @@ export const SettingsUpdateSchema = z.object({
   aiDefaultModel: z.string(),
   aiMaxTokens: z.number().int().positive().optional(),
   autoAnalyze: z.boolean(),
+  // Agent Runtime settings
+  agentRuntimeEnabled: z.boolean().optional(),
+  agentCliPath: z.string().optional(),
+  autoDetectAgents: z.boolean().optional(),
+  maxActiveSessions: z.number().int().positive().optional(),
+  sessionTimeoutMinutes: z.number().int().positive().optional(),
+  contextCompressThreshold: z.number().int().positive().optional(),
+  contextKeepRecentCount: z.number().int().positive().optional(),
+  maxTokensPerSession: z.number().int().positive().optional(),
+  sandboxMode: z.enum(['workspace-only', 'vault-readonly', 'full']).optional(),
 });
 
 export const TestModelRequestSchema = z.object({

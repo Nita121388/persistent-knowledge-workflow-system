@@ -6,7 +6,7 @@ import { WorkspaceRuleCreateSchema, WorkspaceRuleUpdateSchema } from '@pkws/shar
 export const workspaceRuleRoutes: FastifyPluginAsync = async (app) => {
   app.get('/workspace-rules', async () => {
     const db = getDb();
-    const rules = db.select()
+    const rules = await db.select()
       .from(schema.workspaceRules)
       .orderBy(schema.workspaceRules.priority)
       .all() as any;
