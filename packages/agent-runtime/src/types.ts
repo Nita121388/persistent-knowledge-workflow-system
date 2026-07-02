@@ -1,4 +1,5 @@
-import type { CaseId, WorkspaceRule } from '@pkws/shared';
+import type { WorkspaceRule } from '@pkws/shared';
+import type { CaseId } from '@pkws/shared';
 
 // ---- Message ----
 export interface Message {
@@ -76,6 +77,7 @@ export interface SessionSnapshot {
 export interface AgentRuntimeOptions {
   db: any;                   // Drizzle db instance
   workspacePath: string;
+  vaultPath?: string;        // For vault-readonly sandbox mode
   cliPath?: string;          // Auto-detect if empty
   maxActiveSessions?: number;
   sessionTimeoutMinutes?: number;
@@ -83,6 +85,31 @@ export interface AgentRuntimeOptions {
   contextKeepRecentCount?: number;
   maxTokensPerSession?: number;
   sandboxMode?: 'workspace-only' | 'vault-readonly' | 'full';
+  persistence?: SessionPersistence;  // For eviction persistence / restore
+}
+
+// ---- Persistence interface (injected by server) ----
+export interface SessionPersistence {
+  /** Save a session's state to persistent storage */
+  save(caseId: CaseId, data: {
+    messages: Message[];
+    compressedSummary: string | null;
+    turnCount: number;
+    totalTokens: number;
+    compressionEpoch: number;
+    awaitingUserInput: boolean;
+  }): Promise<void>;
+  /** Load a session's state from persistent storage */
+  load(caseId: CaseId): Promise<{
+    messages: Message[];
+    compressedSummary: string | null;
+    turnCount: number;
+    totalTokens: number;
+    compressionEpoch: number;
+    awaitingUserInput: boolean;
+  } | null>;
+  /** Delete a session's persisted state */
+  delete(caseId: CaseId): Promise<void>;
 }
 
 // ---- Default values ----

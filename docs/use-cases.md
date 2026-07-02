@@ -1,9 +1,11 @@
 # 持续知识工作流系统典型使用案例
 
-> 版本：v0.1
+> 版本：v0.2
 > 状态：案例草案
 > 阶段：产品行为约束
-> 更新日期：2026-06-27
+> 更新日期：2026-07-02
+
+> 📊 相关图表：`docs/diagrams/user-end-to-end-flow.md`（端到端用户业务流）、`docs/diagrams/case-lifecycle-timeline.md`（长期 Case 生命周期）
 
 ## 1. 文档目的
 

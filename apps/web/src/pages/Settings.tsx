@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api.js';
-import { Plus, Trash2, Pencil, Settings2, Database, Bot, BookText, FolderOpen, ExternalLink, CheckCircle2, Cpu } from 'lucide-react';
+import { Plus, Trash2, Pencil, Settings2, Database, Bot, BookText, FolderOpen, ExternalLink, CheckCircle2, Cpu, RefreshCw, BookOpen } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
 type Tab = 'general' | 'ai' | 'vault' | 'rules' | 'agent-runtime';
@@ -37,6 +37,14 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
     queryFn: () => apiGet<any>('/settings'),
   });
   const settings = settingsData?.ok ? settingsData.data : null;
+
+  // Available agents for CLI switching
+  const { data: agentsData } = useQuery({
+    queryKey: ['available-agents'],
+    queryFn: () => apiGet<any[]>('/agent-runtime/available-agents'),
+    refetchInterval: 30000,
+  });
+  const availableAgents = agentsData?.ok ? agentsData.data : [];
 
   const { data: rulesData } = useQuery({
     queryKey: ['workspace-rules'],
@@ -121,6 +129,21 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
                     <PathDisplay label="Vault" path={settings.vaultPath} />
                     <PathDisplay label="Inbox" path={settings.inboxPath} />
                     <PathDisplay label="Workspace" path={settings.workspacePath} />
+                    {settings.vaultPath && (
+                      <div className="pt-1">
+                        <button
+                          onClick={() => {
+                            const vaultName = encodeURIComponent('Obsidian');
+                            const vaultPath = encodeURIComponent(settings.vaultPath);
+                            window.open(`obsidian://open?vault=${vaultName}`, '_blank');
+                          }}
+                          className="flex items-center gap-1.5 text-xs text-pkws-600 hover:text-pkws-700 hover:underline"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          Open Vault in Obsidian
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -372,11 +395,69 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
                     {settings.agentRuntimeEnabled ? 'Enabled' : 'Disabled'}
                   </span>
                 </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <Cpu className="w-4 h-4 text-gray-400" />
-                  <span className="text-gray-500">CLI:</span>
-                  <span className="font-mono text-sm">{settings.agentCliPath || '(auto-detect)'}</span>
+
+                {/* Available Agents */}
+                <div className="border-t border-gray-100 pt-4">
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+                    Available Agents
+                    <button
+                      onClick={() => queryClient.invalidateQueries({ queryKey: ['available-agents'] })}
+                      className="ml-2 inline-flex items-center text-gray-300 hover:text-gray-500"
+                      title="Refresh"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                    </button>
+                  </h3>
+                  <div className="space-y-2">
+                    {availableAgents.length === 0 ? (
+                      <div className="text-xs text-gray-400 italic py-2">
+                        No CLI agents detected. Install{' '}
+                        <a href="https://github.com/openai/codex" className="underline" target="_blank" rel="noopener noreferrer">Codex CLI</a>{' '}
+                        or{' '}
+                        <a href="https://docs.anthropic.com/en/docs/claude-code/overview" className="underline" target="_blank" rel="noopener noreferrer">Claude Code</a>.
+                      </div>
+                    ) : (
+                      availableAgents.map((agent: any) => (
+                        <div key={agent.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
+                          <div className="flex items-center gap-2">
+                            <CheckCircle2 className={cn('w-4 h-4', agent.path ? 'text-green-500' : 'text-gray-300')} />
+                            <div>
+                              <div className="text-sm font-medium">{agent.name}</div>
+                              {agent.path ? (
+                                <div className="text-xs text-gray-500 font-mono">{agent.path}</div>
+                              ) : (
+                                <div className="text-xs text-gray-400 italic">Detected by session dirs, not on PATH</div>
+                              )}
+                            </div>
+                          </div>
+                          {agent.path && (
+                            <span className={cn(
+                              'text-xs px-1.5 py-0.5 rounded font-medium',
+                              settings.agentCliPath === agent.path || (!settings.agentCliPath && availableAgents.indexOf(agent) === 0)
+                                ? 'bg-green-100 text-green-700'
+                                : 'bg-gray-100 text-gray-500',
+                            )}>
+                              {settings.agentCliPath === agent.path || (!settings.agentCliPath && availableAgents.indexOf(agent) === 0) ? 'Active' : 'Available'}
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
+
+                {/* Default CLI Selector */}
+                <div className="border-t border-gray-100 pt-4">
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Default CLI</h3>
+                  <div className="text-xs text-gray-500 mb-2">
+                    To switch CLI, update settings via the API and restart the server.
+                  </div>
+                  <div className="text-sm">
+                    <span className="text-gray-500">Current:</span>{' '}
+                    <span className="font-mono text-sm font-medium">{settings.agentCliPath || '(auto-detect)'}</span>
+                  </div>
+                </div>
+
                 <div className="flex items-center gap-2 text-sm">
                   <span className="text-gray-500">Max Active Sessions:</span>
                   <span className="font-medium">{settings.maxActiveSessions}</span>
@@ -385,14 +466,67 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
                   <span className="text-gray-500">Session Timeout:</span>
                   <span className="font-medium">{settings.sessionTimeoutMinutes} min</span>
                 </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="text-gray-500">Sandbox Mode:</span>
-                  <span className="font-medium">{settings.sandboxMode}</span>
-                </div>
               </div>
             ) : (
               <div className="text-center py-8">
                 <p className="text-sm text-gray-400">Configure system in the setup wizard first.</p>
+              </div>
+            )}
+          </div>
+
+          {/* Sandbox Mode */}
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 className="font-semibold mb-4">Sandbox Mode</h2>
+            {settings ? (
+              <div className="space-y-4">
+                <div className="space-y-3">
+                  <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer hover:bg-gray-50 transition-colors">
+                    <input
+                      type="radio"
+                      name="sandboxMode"
+                      value="workspace-only"
+                      checked={settings.sandboxMode === 'workspace-only'}
+                      onChange={() => {}}
+                      className="mt-1"
+                    />
+                    <div>
+                      <div className="font-medium text-sm">Workspace Only</div>
+                      <div className="text-xs text-gray-500 mt-0.5">CLI can only read/write inside the agent's workspace directory. Vault files are not exposed. <span className="font-medium text-gray-600">Default, most secure.</span></div>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer hover:bg-gray-50 transition-colors">
+                    <input
+                      type="radio"
+                      name="sandboxMode"
+                      value="vault-readonly"
+                      checked={settings.sandboxMode === 'vault-readonly'}
+                      onChange={() => {}}
+                      className="mt-1"
+                    />
+                    <div>
+                      <div className="font-medium text-sm">Vault Read-Only</div>
+                      <div className="text-xs text-gray-500 mt-0.5">Copy vault markdown files into the agent's context directory. CLI can reference them but cannot modify originals.</div>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-3 p-3 rounded-lg border cursor-pointer hover:bg-gray-50 transition-colors">
+                    <input
+                      type="radio"
+                      name="sandboxMode"
+                      value="full"
+                      checked={settings.sandboxMode === 'full'}
+                      onChange={() => {}}
+                      className="mt-1"
+                    />
+                    <div>
+                      <div className="font-medium text-sm">Full Access</div>
+                      <div className="text-xs text-gray-500 mt-0.5">No file access restrictions. CLI can read/write anywhere on the filesystem. <span className="font-medium text-red-500">Use with caution.</span></div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <p className="text-sm text-gray-400">Configure system first.</p>
               </div>
             )}
           </div>

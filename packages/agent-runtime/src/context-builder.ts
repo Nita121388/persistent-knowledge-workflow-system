@@ -6,17 +6,29 @@ import { Action, DEFAULTS } from './types.js';
  *
  * @param session - The active CaseSession
  * @param action - The decided action
+ * @param caseData - Optional artifact/case data loaded from SQLite
  * @returns CLAUDE.md content as a string
  */
-export function buildContext(session: CaseSession, action: Action): string {
+export function buildContext(session: CaseSession, action: Action, caseData?: CaseContextData): string {
   switch (action) {
     case Action.NewTurn:
-      return buildFreshClaudeMd(session);
+      return buildFreshClaudeMd(session, caseData);
     case Action.Continue:
-      return buildClaudeMdWithHistory(session);
+      return buildClaudeMdWithHistory(session, caseData);
     case Action.CompressThenContinue:
-      return buildClaudeMdCompressed(session);
+      return buildClaudeMdCompressed(session, caseData);
   }
+}
+
+/**
+ * Artifact and case metadata loaded from SQLite to inject into context.
+ */
+export interface CaseContextData {
+  title?: string;
+  contentBody?: string;
+  sourceUrl?: string;
+  frontmatterContext?: string;
+  instructionSummary?: string;
 }
 
 /**
@@ -57,11 +69,54 @@ function buildPreamble(session: CaseSession): string[] {
 }
 
 /**
+ * Inject case content data into a preamble.
+ */
+function appendCaseData(lines: string[], data?: CaseContextData): void {
+  if (!data) return;
+
+  if (data.title || data.contentBody) {
+    lines.push('### Case Content');
+    lines.push('');
+  }
+
+  if (data.title) {
+    lines.push(`**Title:** ${data.title}`);
+    lines.push('');
+  }
+
+  if (data.sourceUrl) {
+    lines.push(`**Source URL:** ${data.sourceUrl}`);
+    lines.push('');
+  }
+
+  if (data.frontmatterContext) {
+    lines.push('**Frontmatter:**');
+    lines.push('```json');
+    lines.push(data.frontmatterContext);
+    lines.push('```');
+    lines.push('');
+  }
+
+  if (data.contentBody) {
+    // Truncate very long content to avoid exceeding CLI context limits
+    const maxContentLength = 12_000;
+    const body = data.contentBody.length > maxContentLength
+      ? data.contentBody.slice(0, maxContentLength) + `\n\n... (truncated, ${data.contentBody.length - maxContentLength} more chars)`
+      : data.contentBody;
+    lines.push('**Content Body:**');
+    lines.push('');
+    lines.push(body);
+    lines.push('');
+  }
+}
+
+/**
  * Action.NewTurn: Build a fresh CLAUDE.md from SQLite-loaded session data.
  * This is the first turn or a full context rebuild after eviction recovery.
  */
-function buildFreshClaudeMd(session: CaseSession): string {
+function buildFreshClaudeMd(session: CaseSession, caseData?: CaseContextData): string {
   const lines = buildPreamble(session);
+  appendCaseData(lines, caseData);
 
   if (session.messages.length > 0) {
     lines.push('### Conversation History');
@@ -94,8 +149,9 @@ function buildFreshClaudeMd(session: CaseSession): string {
  * Action.Continue: Append the latest user input to existing messages.
  * This is the common case — conversation is already in memory.
  */
-function buildClaudeMdWithHistory(session: CaseSession): string {
+function buildClaudeMdWithHistory(session: CaseSession, caseData?: CaseContextData): string {
   const lines = buildPreamble(session);
+  appendCaseData(lines, caseData);
 
   lines.push('### Conversation History');
   lines.push('Below is the ongoing conversation. Continue from the most recent message.');
@@ -120,8 +176,9 @@ function buildClaudeMdWithHistory(session: CaseSession): string {
  * Action.CompressThenContinue: Compact old messages into a summary,
  * keep the most recent N messages, then continue.
  */
-function buildClaudeMdCompressed(session: CaseSession): string {
+function buildClaudeMdCompressed(session: CaseSession, caseData?: CaseContextData): string {
   const lines = buildPreamble(session);
+  appendCaseData(lines, caseData);
 
   lines.push('### Conversation History');
   lines.push('');

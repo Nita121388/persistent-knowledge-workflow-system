@@ -150,6 +150,7 @@ export interface CaseDetail {
   case: CaseRecord;
   anchor: KnowledgeAnchor;
   artifact: Artifact;
+  vaultPath?: string;  // PKWS settings vault path for Obsidian jump
   currentProposal?: Proposal;
   currentPatch?: PatchManifest;
   instructionSummary?: CaseInstructionSummary;

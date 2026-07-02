@@ -1,10 +1,71 @@
-import type { CaseSession, CaseId } from './types.js';
+import type { CaseSession, CliResult } from './types.js';
 import { Action, DEFAULTS } from './types.js';
-import { buildContext } from './context-builder.js';
-import { compressSession } from './context-builder.js';
+import { type CaseId } from '@pkws/shared';
+import { buildContext, compressSession } from './context-builder.js';
+import type { CaseContextData } from './context-builder.js';
 import { runCliAgent, getAgentWorkDir, type CliRunnerOptions } from './cli-runner.js';
+import { parseCliOutput, type ParsedCliOutput } from './output-parser.js';
+import { writeProposal, writePatch, type OutputWriterOptions } from './output-writer.js';
 import type { SessionManager } from './session.js';
-import type { CliResult } from './types.js';
+
+/**
+ * Emit a per-cycle queue_update event so WebSocket clients
+ * see the latest pending/waiting counts.
+ */
+function emitQueueUpdate(scheduler: Scheduler): void {
+  scheduler.emitEvent?.({
+    type: 'queue_update',
+    pending: scheduler.pendingQueue.length,
+    waiting: scheduler.waitQueue.length,
+  } as any);
+}
+
+/**
+ * Load case content data from the database for context building.
+ * Fetches the artifact content and metadata for the given case.
+ */
+async function loadCaseData(db: any, schema: any, caseId: string): Promise<CaseContextData | undefined> {
+  if (!db || !schema) return undefined;
+
+  try {
+    const caseRow = db.select().from(schema.cases).where(schema.cases.id.eq(caseId)).get();
+    if (!caseRow) return undefined;
+
+    const artifact = caseRow.primaryArtifactId
+      ? db.select().from(schema.artifacts).where(schema.artifacts.id.eq(caseRow.primaryArtifactId)).get()
+      : null;
+
+    const instructionSummary = db.select()
+      .from(schema.caseInstructionSummaries)
+      .where(schema.caseInstructionSummaries.caseId.eq(caseId))
+      .get();
+
+    if (!artifact) return undefined;
+
+    // Read the actual markdown file content if available
+    let contentBody: string | undefined;
+    try {
+      const { readMarkdown } = await import('@pkws/vault');
+      const md = await readMarkdown(artifact.vaultPath);
+      if (md) {
+        contentBody = md.body;
+      }
+    } catch {
+      // File may not exist or vault package not available
+    }
+
+    return {
+      title: artifact.title || caseRow.title,
+      contentBody,
+      sourceUrl: artifact.sourceUrl || undefined,
+      frontmatterContext: artifact.frontmatterJson || undefined,
+      instructionSummary: instructionSummary?.summary || undefined,
+    };
+  } catch (err) {
+    console.warn(`[loadCaseData] Failed to load data for ${caseId}:`, err);
+    return undefined;
+  }
+}
 
 /**
  * Decide what action to take for a given session.
@@ -39,17 +100,22 @@ export interface SchedulerOptions {
   sessionManager: SessionManager;
   workspacePath: string;
   cliPath: string;
+  db?: any;
+  schema?: any;
   compressThreshold?: number;
   keepRecentCount?: number;
   maxTokensPerSession?: number;
   sleepMs?: number;
   cliTimeoutMs?: number;
+  sandboxMode?: 'workspace-only' | 'vault-readonly' | 'full';
+  vaultPath?: string;
 }
 
 export type SchedulerEvent =
   | { type: 'turn_started'; caseId: CaseId; action: Action }
   | { type: 'turn_completed'; caseId: CaseId; result: CliResult }
   | { type: 'turn_failed'; caseId: CaseId; error: string }
+  | { type: 'session_created'; caseId: CaseId }
   | { type: 'session_evicted'; caseId: CaseId }
   | { type: 'idle' };
 
@@ -63,8 +129,8 @@ export type SchedulerEvent =
  * 4. If all cases are awaitingUserInput → idle (sleep)
  */
 export class Scheduler {
-  private pendingQueue: CaseId[] = [];
-  private waitQueue: CaseId[] = [];        // cases waiting for user input
+  pendingQueue: CaseId[] = [];       // public for emitQueueUpdate
+  waitQueue: CaseId[] = [];          // public for emitQueueUpdate
   private readonly sessionManager: SessionManager;
   private readonly workspacePath: string;
   private readonly cliPath: string;
@@ -73,26 +139,37 @@ export class Scheduler {
   private readonly maxTokensPerSession: number;
   private readonly sleepMs: number;
   private readonly cliTimeoutMs: number;
+  private readonly sandboxMode: 'workspace-only' | 'vault-readonly' | 'full';
+  private readonly vaultPath: string | undefined;
+  private readonly db: any;
+  private readonly schema: any;
 
   private running = false;
-  private onEvent?: (event: SchedulerEvent) => void;
+  private retryCounts = new Map<CaseId, number>();
+  private readonly maxRetries = 3;
+  /** Exposed for internal emit helpers — external code uses setEventHandler */
+  emitEvent?: (event: SchedulerEvent) => void;
 
   constructor(opts: SchedulerOptions) {
     this.sessionManager = opts.sessionManager;
     this.workspacePath = opts.workspacePath;
     this.cliPath = opts.cliPath;
+    this.db = opts.db ?? null;
+    this.schema = opts.schema ?? null;
     this.compressThreshold = opts.compressThreshold ?? DEFAULTS.contextCompressThreshold;
     this.keepRecentCount = opts.keepRecentCount ?? DEFAULTS.contextKeepRecentCount;
     this.maxTokensPerSession = opts.maxTokensPerSession ?? DEFAULTS.maxTokensPerSession;
     this.sleepMs = opts.sleepMs ?? DEFAULTS.sleepMs;
     this.cliTimeoutMs = opts.cliTimeoutMs ?? DEFAULTS.cliTimeoutMs;
+    this.sandboxMode = opts.sandboxMode ?? DEFAULTS.sandboxMode;
+    this.vaultPath = opts.vaultPath;
   }
 
   /**
    * Register an event listener for scheduler lifecycle events.
    */
   setEventHandler(handler: (event: SchedulerEvent) => void): void {
-    this.onEvent = handler;
+    this.emitEvent = handler;
   }
 
   /**
@@ -128,7 +205,7 @@ export class Scheduler {
 
       if (!caseId) {
         // Nothing to do — sleep
-        this.onEvent?.({ type: 'idle' });
+        this.emitEvent?.({ type: 'idle' });
         await this.sleep();
         continue;
       }
@@ -142,7 +219,8 @@ export class Scheduler {
           maxTokensPerSession: this.maxTokensPerSession,
         });
 
-        this.onEvent?.({ type: 'turn_started', caseId, action });
+        this.emitEvent?.({ type: 'turn_started', caseId, action });
+        emitQueueUpdate(this);
 
         // Apply compression if needed
         if (action === Action.CompressThenContinue) {
@@ -150,7 +228,8 @@ export class Scheduler {
         }
 
         // Build the CLAUDE.md context
-        const context = buildContext(session, action);
+        const caseData = await loadCaseData(this.db, this.schema, caseId);
+        const context = buildContext(session, action, caseData);
 
         // Determine the agent work directory
         const workDir = getAgentWorkDir(this.workspacePath, caseId);
@@ -161,12 +240,54 @@ export class Scheduler {
           workDir,
           taskPrompt: context,
           timeoutMs: this.cliTimeoutMs,
+          sandboxMode: this.sandboxMode,
+          vaultPath: this.vaultPath,
+          workspacePath: this.workspacePath,
         });
+
+        // Reset retry count on success
+        this.retryCounts.delete(caseId);
 
         // Process the result
         if (result.exitCode === 0 && !result.timedOut) {
-          // Success — add assistant response to messages
-          const assistantContent = result.stdout.trim() || '*(no output)*';
+          // Parse structured output files (proposal.json, patch-operations.json)
+          const parsed = parseCliOutput(result.outputFiles, result.stdout);
+
+          if (parsed.errors.length > 0) {
+            console.warn(`[Scheduler] Output parse warnings for ${caseId}:`, parsed.errors);
+          }
+
+          // Write proposal to DB if found
+          if (parsed.proposal && this.db && this.schema) {
+            try {
+              await writeProposal(
+                { db: this.db, schema: this.schema },
+                caseId,
+                parsed.proposal,
+                this.cliPath,
+              );
+            } catch (err: any) {
+              console.error(`[Scheduler] Failed to write proposal for ${caseId}:`, err.message);
+            }
+          }
+
+          // Write patch to DB if found
+          if (parsed.patch && this.db && this.schema) {
+            try {
+              await writePatch(
+                { db: this.db, schema: this.schema },
+                caseId,
+                parsed.patch.operations,
+              );
+            } catch (err: any) {
+              console.error(`[Scheduler] Failed to write patch for ${caseId}:`, err.message);
+            }
+          }
+
+          // Add assistant response to in-memory messages
+          const assistantContent = parsed.proposal
+            ? `Proposal: ${parsed.proposal.title} — ${parsed.proposal.reasoningSummary}`
+            : (result.stdout.trim() || '*(no output)*');
           this.sessionManager.appendMessage(caseId, 'assistant', assistantContent);
 
           // Check if the agent is asking for user input
@@ -178,39 +299,72 @@ export class Scheduler {
             session.awaitingUserInput = true;
             session.hasNewUserInput = false;
             this.waitQueue.push(caseId);
+          } else if (parsed.proposal) {
+            // Proposal was generated — wait for user to review
+            session.awaitingUserInput = true;
+            session.hasNewUserInput = false;
+            this.waitQueue.push(caseId);
           } else {
             // Agent is still working — re-queue for next cycle
             session.hasNewUserInput = false;
             this.pendingQueue.push(caseId);
           }
 
-          this.onEvent?.({ type: 'turn_completed', caseId, result });
+          this.emitEvent?.({ type: 'turn_completed', caseId, result });
+          emitQueueUpdate(this);
         } else if (result.timedOut) {
           // Timeout — still record the partial output
           const partialContent = result.stdout.trim() || `*(timed out after ${this.cliTimeoutMs}ms)*`;
           this.sessionManager.appendMessage(caseId, 'assistant', partialContent);
-          session.awaitingUserInput = true; // Wait for user to decide what to do
-          this.waitQueue.push(caseId);
+          this.emitEvent?.({ type: 'turn_failed', caseId, error: `Timed out after ${this.cliTimeoutMs}ms` });
+          emitQueueUpdate(this);
 
-          this.onEvent?.({ type: 'turn_failed', caseId, error: `Timed out after ${this.cliTimeoutMs}ms` });
+          // Timeout: wait for user to decide retry
+          session.awaitingUserInput = true;
+          this.waitQueue.push(caseId);
         } else {
-          // Error
+          // Error — apply retry logic for non-timeout failures
           const errorMsg = `CLI exited with code ${result.exitCode}: ${result.stderr.slice(0, 500)}`;
           this.sessionManager.appendMessage(caseId, 'assistant', `Error: ${errorMsg}`);
-          session.awaitingUserInput = true; // Wait for user intervention
-          this.waitQueue.push(caseId);
+          this.emitEvent?.({ type: 'turn_failed', caseId, error: errorMsg });
+          emitQueueUpdate(this);
 
-          this.onEvent?.({ type: 'turn_failed', caseId, error: errorMsg });
+          // Retry up to maxRetries on non-timeout errors
+          const retries = (this.retryCounts.get(caseId) ?? 0) + 1;
+          this.retryCounts.set(caseId, retries);
+          if (retries <= this.maxRetries) {
+            console.log(`[Scheduler] Retry ${retries}/${this.maxRetries} for ${caseId} after CLI error`);
+            this.pendingQueue.push(caseId);
+          } else {
+            console.error(`[Scheduler] Case ${caseId} failed after ${this.maxRetries} retries. Waiting for user.`);
+            session.awaitingUserInput = true;
+            this.waitQueue.push(caseId);
+            this.retryCounts.delete(caseId);
+          }
         }
 
         // Evict stale sessions periodically
         this.evictStale();
       } catch (err: any) {
         console.error(`[Scheduler] Error processing case ${caseId}:`, err);
-        this.onEvent?.({ type: 'turn_failed', caseId, error: err.message });
+        this.emitEvent?.({ type: 'turn_failed', caseId, error: err.message });
+        emitQueueUpdate(this);
 
-        // Put it back in queue for retry
-        this.pendingQueue.push(caseId);
+        // Error recovery: retry up to maxRetries times
+        const retries = (this.retryCounts.get(caseId) ?? 0) + 1;
+        this.retryCounts.set(caseId, retries);
+        if (retries <= this.maxRetries) {
+          console.log(`[Scheduler] Retry ${retries}/${this.maxRetries} for ${caseId}`);
+          this.pendingQueue.push(caseId);
+        } else {
+          console.error(`[Scheduler] Case ${caseId} failed after ${this.maxRetries} retries. Moving to wait queue.`);
+          const session = this.sessionManager.get(caseId);
+          if (session) {
+            session.awaitingUserInput = true;
+            this.waitQueue.push(caseId);
+          }
+          this.retryCounts.delete(caseId);
+        }
       }
     }
   }
@@ -258,6 +412,7 @@ export class Scheduler {
   enqueue(caseId: CaseId): void {
     if (!this.pendingQueue.includes(caseId) && !this.waitQueue.includes(caseId)) {
       this.pendingQueue.push(caseId);
+      this.emitEvent?.({ type: 'session_created', caseId });
     }
   }
 
@@ -267,6 +422,7 @@ export class Scheduler {
   dequeue(caseId: CaseId): void {
     this.pendingQueue = this.pendingQueue.filter(id => id !== caseId);
     this.waitQueue = this.waitQueue.filter(id => id !== caseId);
+    this.retryCounts.delete(caseId);
   }
 
   /**
@@ -276,7 +432,7 @@ export class Scheduler {
     const evicted = this.sessionManager.evictStale();
     for (const session of evicted) {
       this.dequeue(session.caseId);
-      this.onEvent?.({ type: 'session_evicted', caseId: session.caseId });
+      this.emitEvent?.({ type: 'session_evicted', caseId: session.caseId });
     }
   }
 

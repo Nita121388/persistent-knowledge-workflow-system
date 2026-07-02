@@ -10,6 +10,12 @@ export interface CliRunnerOptions {
   taskPrompt: string;
   timeoutMs?: number;
   envVars?: Record<string, string>;
+  /** Sandbox mode controlling file access scope */
+  sandboxMode?: 'workspace-only' | 'vault-readonly' | 'full';
+  /** Vault path (required for vault-readonly mode) */
+  vaultPath?: string;
+  /** Workspace path for context file isolation */
+  workspacePath?: string;
 }
 
 /**
@@ -27,10 +33,16 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
     taskPrompt,
     timeoutMs = DEFAULTS.cliTimeoutMs,
     envVars = {},
+    sandboxMode = 'workspace-only',
+    vaultPath,
+    workspacePath,
   } = options;
 
   // Ensure workDir exists
   fs.mkdirSync(workDir, { recursive: true });
+
+  // Apply sandbox: copy allowed context files into the workDir
+  prepareSandboxedContext(sandboxMode, workDir, vaultPath, workspacePath);
 
   // Write CLAUDE.md
   const claudeMdPath = path.join(workDir, 'CLAUDE.md');
@@ -39,6 +51,12 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
   // Ensure output directory
   const outputDir = path.join(workDir, 'output');
   fs.mkdirSync(outputDir, { recursive: true });
+
+  // Deny-list note for future use: when sandboxed, the CLI should not
+  // write outside output/. Currently enforced by cwd isolation.
+  const denyWritePaths: string[] = sandboxMode !== 'full'
+    ? ['context', 'CLAUDE.md']
+    : [];
 
   const startTime = Date.now();
 
@@ -149,4 +167,89 @@ export async function verifyCli(cliPath: string): Promise<boolean> {
  */
 export function getAgentWorkDir(workspacePath: string, caseId: string): string {
   return path.join(workspacePath, 'agents', caseId);
+}
+
+/**
+ * Prepare a sandboxed context directory for the CLI agent.
+ *
+ * Depending on sandboxMode, copies allowed files into the workDir's context/ folder:
+ * - workspace-only: nothing extra (the workDir itself is inside workspace)
+ * - vault-readonly: copies vault markdown files into context/vault/
+ * - full: no restrictions (the CLI has full filesystem access)
+ */
+export function prepareSandboxedContext(
+  mode: 'workspace-only' | 'vault-readonly' | 'full',
+  workDir: string,
+  vaultPath?: string,
+  workspacePath?: string,
+): void {
+  switch (mode) {
+    case 'workspace-only':
+      // No extra context copies needed — the agent reads its own CLAUDE.md
+      // The workDir is inside workspacePath/agents/{caseId}/, so the CLI
+      // is naturally confined by the cwd. No vault files are exposed.
+      break;
+
+    case 'vault-readonly': {
+      // Copy vault files into context/vault/ as read-only references
+      if (!vaultPath) {
+        console.warn('[Sandbox] vault-readonly mode selected but no vaultPath provided — skipping vault copy');
+        return;
+      }
+      const vaultContextDir = path.join(workDir, 'context', 'vault');
+      fs.mkdirSync(vaultContextDir, { recursive: true });
+      const copyCount = copyVaultFilesForContext(vaultPath, vaultContextDir);
+      console.log(`[Sandbox] vault-readonly: copied ${copyCount} vault files to ${vaultContextDir}`);
+      break;
+    }
+
+    case 'full':
+      // No restrictions — CLI can read/write anywhere
+      console.log('[Sandbox] full mode: no file access restrictions');
+      break;
+  }
+}
+
+/**
+ * Copy vault markdown files into a context directory.
+ * Respects a depth limit and file count limit to avoid overwhelming the agent.
+ */
+function copyVaultFilesForContext(vaultPath: string, targetDir: string): number {
+  const MAX_FILES = 50;
+  const MAX_DEPTH = 3;
+  let count = 0;
+
+  function walk(dir: string, depth: number): void {
+    if (depth > MAX_DEPTH || count >= MAX_FILES) return;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (count >= MAX_FILES) return;
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          // Skip .git, node_modules, hidden dirs
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+          walk(fullPath, depth + 1);
+        } else if (entry.name.endsWith('.md')) {
+          const relPath = path.relative(vaultPath, fullPath);
+          const targetFile = path.join(targetDir, relPath);
+          fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+          try {
+            fs.copyFileSync(fullPath, targetFile);
+            count++;
+          } catch {
+            // Permission error or locked file — skip gracefully
+          }
+        }
+      }
+    } catch {
+      // Permission denied or other read error — skip
+    }
+  }
+
+  if (fs.existsSync(vaultPath)) {
+    walk(vaultPath, 0);
+  }
+
+  return count;
 }

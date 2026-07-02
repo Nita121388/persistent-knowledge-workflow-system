@@ -1,9 +1,14 @@
 # 持续知识工作流系统总体架构设计
 
-> 版本：v0.3
+> 版本：v0.4
 > 状态：架构草案
 > 阶段：MVP 架构设计
-> 更新日期：2026-06-27
+> 更新日期：2026-07-02
+
+> 📊 相关图表：
+>   - `docs/diagrams/agent-runtime-scheduler.md`（Agent Runtime 多 Case 调度架构）
+>   - `docs/diagrams/user-surface-roles.md`（三个用户界面职责划分）
+>   - `docs/diagrams/user-end-to-end-flow.md`（端到端用户业务流）
 
 ## 1. 架构目标
 

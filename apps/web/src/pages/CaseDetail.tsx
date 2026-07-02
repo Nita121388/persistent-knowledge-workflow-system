@@ -4,7 +4,15 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost } from '../lib/api.js';
 import { cn, getStatusColor, timeAgo } from '../lib/utils.js';
 import type { CaseDetail, PatchPreview, Proposal, PatchIntent } from '@pkws/shared';
-import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FilePlus, FolderOpen, FileText, Move, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FilePlus, FolderOpen, FileText, Move, ExternalLink, BookOpen, Loader2 } from 'lucide-react';
+
+/** Open a vault file in Obsidian using obsidian:// URI */
+function openInObsidian(vaultPath: string, fileFullPath: string) {
+  const normalizedPath = fileFullPath.replace(/\\/g, '/');
+  // obsidian://open?path= uses absolute filesystem path (more reliable than vault+file)
+  const pathParam = encodeURIComponent(normalizedPath);
+  window.open(`obsidian://open?path=${pathParam}`, '_blank');
+}
 
 export function CaseDetailPage() {
   const { caseId } = useParams<{ caseId: string }>();
@@ -25,6 +33,11 @@ export function CaseDetailPage() {
   const caseDetail = data?.ok ? data.data : null;
 
   // Mutations
+  const analyzeMutation = useMutation({
+    mutationFn: () => apiPost(`/cases/${caseId}/analyze`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
+  });
+
   const commentMutation = useMutation({
     mutationFn: (comment: string) => apiPost(`/cases/${caseId}/comment`, { comment, updateInstructionSummary: true }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
@@ -100,6 +113,7 @@ export function CaseDetailPage() {
   const patchIntents = caseDetail.patchIntents || [];
 
   const canModify = ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
+  const isCaptured = c.status === 'Captured';
   const showProposal = proposal && ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
   const showPatch = patch && patch.status === 'preview';
 
@@ -162,6 +176,15 @@ export function CaseDetailPage() {
               >
                 {caseDetail.anchor.currentVaultPath}
               </button>
+              <span className="text-gray-300">·</span>
+              <button
+                onClick={() => openInObsidian(caseDetail.vaultPath || '', caseDetail.anchor.currentVaultPath)}
+                className="flex items-center gap-1 text-gray-400 hover:text-pkws-600 transition-colors"
+                title="Open in Obsidian"
+              >
+                <BookOpen className="w-3 h-3" />
+                <span className="text-xs">Open in Obsidian</span>
+              </button>
             </div>
           )}
           <p className="text-xs text-gray-400 mt-0.5">
@@ -194,6 +217,7 @@ export function CaseDetailPage() {
           <button
             onClick={() => setShowPatchForm(!showPatchForm)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 border border-purple-200"
+            title="Generate Patch"
           >
             <FilePlus className="w-4 h-4" /> Generate Patch
           </button>
@@ -205,6 +229,29 @@ export function CaseDetailPage() {
               <RotateCcw className="w-4 h-4" /> Reopen
             </button>
           )}
+        </div>
+      )}
+
+      {/* Analyze button for Captured state */}
+      {isCaptured && (
+        <div className="flex flex-wrap gap-2 mb-6">
+          <button
+            onClick={() => analyzeMutation.mutate()}
+            disabled={analyzeMutation.isPending}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm bg-pkws-600 text-white rounded-lg hover:bg-pkws-700 disabled:opacity-50 transition-colors"
+          >
+            {analyzeMutation.isPending ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Analyzing...</>
+            ) : (
+              <><Bot className="w-4 h-4" /> Generate Proposal</>
+            )}
+          </button>
+          <button
+            onClick={() => dropMutation.mutate()}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm bg-red-50 text-red-700 rounded-lg hover:bg-red-100 border border-red-200"
+          >
+            <Trash2 className="w-4 h-4" /> Drop
+          </button>
         </div>
       )}
 

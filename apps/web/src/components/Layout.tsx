@@ -1,9 +1,11 @@
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '../lib/utils.js';
-import { LayoutDashboard, Settings2, Github } from 'lucide-react';
+import { LayoutDashboard, Settings2, Cpu, ScrollText, Github } from 'lucide-react';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { path: '/agent-runtime', label: 'Agents', icon: Cpu },
+  { path: '/logs', label: 'Logs', icon: ScrollText },
   { path: '/settings', label: 'Settings', icon: Settings2 },
 ];
 
@@ -29,7 +31,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   to={path}
                   className={cn(
                     'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors',
-                    location.pathname === path || (path === '/settings' && location.pathname.startsWith('/settings'))
+                    location.pathname === path || (path === '/settings' && location.pathname.startsWith('/settings')) || (path === '/agent-runtime' && location.pathname.startsWith('/agent-runtime')) || (path === '/logs' && location.pathname.startsWith('/logs'))
                       ? 'bg-gray-100 text-gray-900 font-medium'
                       : 'text-gray-500 hover:text-gray-700'
                   )}

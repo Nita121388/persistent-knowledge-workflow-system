@@ -94,6 +94,8 @@ Agent Runtime（常驻进程，不是每次新建）
 
 ### 3.1 组件图
 
+> 详细 Mermaid 流程图见 [docs/diagrams/agent-runtime-scheduler.md](../diagrams/agent-runtime-scheduler.md)
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                      PKWS Agent Runtime                          │

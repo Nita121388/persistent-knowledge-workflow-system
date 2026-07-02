@@ -1,7 +1,9 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import fastifyWebsocket from '@fastify/websocket';
 import { initStorage, getDb, schema } from '@pkws/storage';
 import { eq } from 'drizzle-orm';
+import { logRoutes } from './routes/logs.js';
 import { settingsRoutes } from './routes/settings.js';
 import { caseRoutes } from './routes/cases.js';
 import { inboxRoutes } from './routes/inbox.js';
@@ -9,9 +11,12 @@ import { anchorRoutes } from './routes/anchors.js';
 import { workspaceRuleRoutes } from './routes/workspace-rules.js';
 import { jobRoutes } from './routes/jobs.js';
 import { healthRoutes } from './routes/health.js';
+import { agentRuntimeRoutes } from './routes/agent-runtime.js';
+import { agentRuntimeWsRoutes } from './routes/agent-runtime-ws.js';
 import { startWorker } from './worker/index.js';
 import { initFileWatcher } from './watcher.js';
-import { startAgentRuntime, type AgentRuntime } from '@pkws/agent-runtime';
+import { startAgentRuntime, type AgentRuntime, type WsEvent, logger } from '@pkws/agent-runtime';
+import { broadcastWsEvent, broadcastLogEntry } from './ws-broadcast.js';
 import type { Settings } from '@pkws/shared';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,6 +66,7 @@ async function loadSettings(): Promise<Settings | null> {
 async function main() {
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
+  await app.register(fastifyWebsocket);
 
   // Check if settings exist to know if we need setup
   const configPath = path.join(__dirname, '..', 'config.json');
@@ -81,6 +87,11 @@ async function main() {
 
   if (!needsSetup) {
     initStorage(workspacePath);
+    // Initialize logger after storage
+    logger.init(getDb(), schema);
+    logger.setWsBroadcast(broadcastLogEntry);
+    logger.info('system', 'Logger initialized with SQLite + WebSocket');
+
     startWorker();
     initFileWatcher();
 
@@ -88,9 +99,13 @@ async function main() {
     const settings = await loadSettings();
     if (settings?.agentRuntimeEnabled) {
       try {
+        const { createPersistence } = await import('@pkws/agent-runtime');
+        const persistence = createPersistence(getDb(), schema);
+
         agentRuntime = await startAgentRuntime({
           db: getDb(),
           workspacePath: settings.workspacePath,
+          vaultPath: settings.vaultPath,
           cliPath: settings.agentCliPath || undefined,
           maxActiveSessions: settings.maxActiveSessions,
           sessionTimeoutMinutes: settings.sessionTimeoutMinutes,
@@ -98,7 +113,14 @@ async function main() {
           contextKeepRecentCount: settings.contextKeepRecentCount,
           maxTokensPerSession: settings.maxTokensPerSession,
           sandboxMode: settings.sandboxMode,
+          persistence,
         });
+
+        // Wire up WebSocket broadcast
+        agentRuntime.setWsBroadcast((event: WsEvent) => {
+          broadcastWsEvent(event);
+        });
+
         console.log('[AgentRuntime] Started successfully via settings');
       } catch (err) {
         console.error('[AgentRuntime] Failed to start:', err);
@@ -119,13 +141,16 @@ async function main() {
   await app.register(anchorRoutes, { prefix: '/api' });
   await app.register(workspaceRuleRoutes, { prefix: '/api' });
   await app.register(jobRoutes, { prefix: '/api' });
+  await app.register(agentRuntimeRoutes, { prefix: '/api' });
+  await app.register(agentRuntimeWsRoutes, { prefix: '/api' });
+  await app.register(logRoutes, { prefix: '/api' });
 
   const port = process.env.PORT ? parseInt(process.env.PORT) : 3731;
   const host = process.env.HOST || '0.0.0.0';
 
   try {
     await app.listen({ port, host });
-    console.log(`PKWS Server running at http://localhost:${port}`);
+    logger.info('system', `PKWS Server running at http://localhost:${port}`);
     console.log(`Status: ${needsSetup ? 'SETUP REQUIRED' : 'READY'}`);
   } catch (err) {
     app.log.error(err);

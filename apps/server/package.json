@@ -11,21 +11,23 @@
     "db:migrate": "tsx src/db-migrate.ts"
   },
   "dependencies": {
+    "@fastify/cors": "^10.1.0",
+    "@fastify/websocket": "^11.2.0",
     "@pkws/agent-runtime": "workspace:*",
+    "@pkws/ai": "workspace:*",
     "@pkws/shared": "workspace:*",
     "@pkws/storage": "workspace:*",
     "@pkws/vault": "workspace:*",
-    "@pkws/ai": "workspace:*",
+    "chokidar": "^4.0.3",
     "drizzle-orm": "^0.38.0",
     "fastify": "^5.2.0",
-    "@fastify/cors": "^10.1.0",
-    "chokidar": "^4.0.3",
     "p-queue": "^8.1.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "drizzle-kit": "^0.30.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "drizzle-kit": "^0.30.0"
+    "typescript": "^5.7.0"
   }
 }

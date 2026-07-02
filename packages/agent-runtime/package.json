@@ -13,10 +13,11 @@
   "dependencies": {
     "@pkws/shared": "workspace:*",
     "@pkws/storage": "workspace:*",
+    "drizzle-orm": "^0.38.4",
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
   }
 }

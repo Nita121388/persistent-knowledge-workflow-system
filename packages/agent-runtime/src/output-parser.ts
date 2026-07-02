@@ -1,0 +1,115 @@
+import { z } from 'zod';
+
+/**
+ * Zod schemas for parsing structured output from CLI agents.
+ *
+ * CLI agents (Codex / Claude Code) write their output as JSON files
+ * in the workDir/output/ directory. The scheduler parses these and
+ * integrates them into the PKWS data model.
+ */
+
+// ---- Proposal JSON ----
+// Written by CLI agent to output/proposal.json
+
+export const CliProposalSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  valueJudgement: z.enum(['high', 'medium', 'low', 'drop']),
+  suggestedActions: z.array(z.enum([
+    'mark_done', 'drop', 'move', 'append_summary',
+    'update_frontmatter', 'generate_formal_note', 'merge_later', 'need_more_research',
+  ])),
+  suggestedTargetPath: z.string().optional(),
+  reasoningSummary: z.string(),
+  risks: z.array(z.string()).optional(),
+  requiresPatch: z.boolean().default(false),
+});
+
+export type CliProposal = z.infer<typeof CliProposalSchema>;
+
+// ---- Patch Operations JSON ----
+// Written by CLI agent to output/patch-operations.json
+
+export const CliPatchOperationSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('create_file'),
+    path: z.string(),
+    content: z.string(),
+  }),
+  z.object({
+    type: z.literal('update_file'),
+    path: z.string(),
+    newContent: z.string(),
+  }),
+  z.object({
+    type: z.literal('move_file'),
+    fromPath: z.string(),
+    toPath: z.string(),
+  }),
+]);
+
+export const CliPatchSchema = z.object({
+  operations: z.array(CliPatchOperationSchema),
+});
+
+export type CliPatchOperation = z.infer<typeof CliPatchOperationSchema>;
+export type CliPatch = z.infer<typeof CliPatchSchema>;
+
+// ---- Output Parser ----
+
+export interface ParsedCliOutput {
+  proposal: CliProposal | null;
+  patch: CliPatch | null;
+  rawText: string;
+  errors: string[];
+}
+
+/**
+ * Parse CLI agent output files from the output directory.
+ * Looks for proposal.json and/or patch-operations.json.
+ */
+export function parseCliOutput(
+  outputFiles: Array<{ path: string; content: string }>,
+  stdout: string,
+): ParsedCliOutput {
+  const errors: string[] = [];
+  let proposal: CliProposal | null = null;
+  let patch: CliPatch | null = null;
+
+  for (const file of outputFiles) {
+    const filename = file.path.split(/[/\\]/).pop() || '';
+
+    if (filename === 'proposal.json') {
+      try {
+        const json = JSON.parse(file.content);
+        proposal = CliProposalSchema.parse(json);
+      } catch (e: any) {
+        errors.push(`proposal.json parse error: ${e.message}`);
+      }
+    }
+
+    if (filename === 'patch-operations.json') {
+      try {
+        const json = JSON.parse(file.content);
+        patch = CliPatchSchema.parse(json);
+      } catch (e: any) {
+        errors.push(`patch-operations.json parse error: ${e.message}`);
+      }
+    }
+  }
+
+  // Also try to extract proposal from stdout if no file was found
+  if (!proposal && stdout) {
+    const jsonMatch = stdout.match(/\{[\s\S]*"title"[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const json = JSON.parse(jsonMatch[0]);
+        proposal = CliProposalSchema.parse(json);
+      } catch {
+        // Ignore — stdout is text, not structured JSON
+      }
+    }
+  }
+
+  return { proposal, patch, rawText: stdout, errors };
+}

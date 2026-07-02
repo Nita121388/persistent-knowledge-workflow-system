@@ -7,6 +7,8 @@ import { CaseDetailPage } from './pages/CaseDetail.js';
 import { ProposalReviewPage } from './pages/ProposalReview.js';
 import { PatchPreviewPage } from './pages/PatchPreview.js';
 import { SettingsPage } from './pages/Settings.js';
+import { AgentRuntimeDashboardPage } from './pages/AgentRuntimeDashboard.js';
+import { LogsPage } from './pages/Logs.js';
 import { Layout } from './components/Layout.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 
@@ -32,7 +34,9 @@ export default function App() {
         <Route path="/cases/:caseId/proposal" element={<ProposalReviewPage />} />
         <Route path="/cases/:caseId/patch" element={<PatchPreviewPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/agent-runtime" element={<AgentRuntimeDashboardPage />} />
         <Route path="/settings/ai" element={<SettingsPage tab="ai" />} />
+        <Route path="/logs" element={<LogsPage />} />
         <Route path="/settings/vault" element={<SettingsPage tab="vault" />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

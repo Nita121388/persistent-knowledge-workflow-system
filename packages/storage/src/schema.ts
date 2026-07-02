@@ -189,3 +189,32 @@ export const jobs = sqliteTable('jobs', {
   index('idx_jobs_status').on(table.status),
   index('idx_jobs_type').on(table.type),
 ]);
+
+export const agentSessions = sqliteTable('agent_sessions', {
+  caseId: text('case_id').primaryKey().notNull().references(() => cases.id),
+  messagesJson: text('messages_json').notNull(),
+  compressedSummary: text('compressed_summary'),
+  turnCount: integer('turn_count').notNull().default(0),
+  totalTokens: integer('total_tokens').notNull().default(0),
+  compressionEpoch: integer('compression_epoch').notNull().default(0),
+  awaitingUserInput: integer('awaiting_user_input', { mode: 'boolean' }).notNull().default(false),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_agent_sessions_updated').on(table.updatedAt),
+]);
+
+export const logEntries = sqliteTable('log_entries', {
+  id: text('id').primaryKey().notNull(),
+  timestamp: text('timestamp').notNull(),
+  level: text('level', { enum: ['debug', 'info', 'warn', 'error'] }).notNull(),
+  category: text('category', { enum: ['system', 'api', 'agent', 'worker', 'ai', 'db', 'ws', 'user'] }).notNull(),
+  message: text('message').notNull(),
+  dataJson: text('data_json'),
+  caseId: text('case_id'),
+  jobId: text('job_id'),
+}, (table) => [
+  index('idx_log_timestamp').on(table.timestamp),
+  index('idx_log_level').on(table.level),
+  index('idx_log_category').on(table.category),
+  index('idx_log_case').on(table.caseId),
+]);

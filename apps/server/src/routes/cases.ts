@@ -1,10 +1,23 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { getDb, schema } from '@pkws/storage';
 import { eq, desc, like, inArray, and } from 'drizzle-orm';
-import { CommentRequestSchema, ReopenRequestSchema, type CaseStatus } from '@pkws/shared';
+import { CommentRequestSchema, type CaseId, type CaseStatus } from '@pkws/shared';
 import type { CaseDetail, CaseListItem } from '@pkws/shared';
-import { genEventId } from '@pkws/shared/utils.js';
+import { genEventId, ReopenRequestSchema } from '@pkws/shared/utils.js';
 import { agentRuntime } from '../index.js';
+
+/**
+ * Load the vault path from settings for Obsidian URI use.
+ */
+function getVaultPath(): string {
+  try {
+    const db = getDb();
+    const row = db.select().from(schema.settings).get();
+    return (row as any)?.vaultPath || '';
+  } catch {
+    return '';
+  }
+}
 
 export const caseRoutes: FastifyPluginAsync = async (app) => {
   // GET /cases — list cases with optional filters
@@ -150,6 +163,7 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       case: caseRow as any,
       anchor: anchor as any,
       artifact: artifact as any,
+      vaultPath: getVaultPath(),
       currentProposal,
       currentPatch,
       instructionSummary: instructionSummary || undefined,
@@ -337,6 +351,71 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     }).run();
 
     return { ok: true, data: { success: true } };
+  });
+
+  // POST /cases/:caseId/analyze — trigger AI analysis from Captured state
+  app.post('/cases/:caseId/analyze', async (request, reply) => {
+    const { caseId } = request.params as { caseId: string };
+    const db = getDb();
+
+    const caseRow = await db.select()
+      .from(schema.cases)
+      .where(eq(schema.cases.id, caseId))
+      .get();
+
+    if (!caseRow) {
+      return reply.status(404).send({ ok: false, error: { code: 'NOT_FOUND', message: 'Case not found' } });
+    }
+
+    if (caseRow.status !== 'Captured') {
+      return reply.status(400).send({ ok: false, error: { code: 'WRONG_STATUS', message: 'Only Captured cases can be analyzed' } });
+    }
+
+    // Update status to Analyzing
+    db.update(schema.cases)
+      .set({ status: 'Analyzing', updatedAt: new Date().toISOString() })
+      .where(eq(schema.cases.id, caseId))
+      .run();
+
+    db.insert(schema.timelineEvents).values({
+      id: genEventId(),
+      caseId,
+      type: 'ai_proposal_started',
+      actor: 'system',
+      summary: 'User triggered AI analysis',
+      createdAt: new Date().toISOString(),
+    }).run();
+
+    // Route to Agent Runtime or Job Queue
+    if (agentRuntime) {
+      const rules = await db.select()
+        .from(schema.workspaceRules)
+        .where(eq(schema.workspaceRules.enabled, true))
+        .orderBy(schema.workspaceRules.priority)
+        .all();
+
+      const instructionSummary = await db.select()
+        .from(schema.caseInstructionSummaries)
+        .where(eq(schema.caseInstructionSummaries.caseId, caseId))
+        .get();
+
+      agentRuntime.enqueueCase(caseId, {
+        workspaceRules: rules,
+        caseInstructions: instructionSummary?.summary || '',
+      });
+
+      agentRuntime.onUserInput(caseId, 'Analyze this case and generate a proposal.');
+      return { ok: true, data: { success: true, mode: 'agent-runtime' } };
+    }
+
+    // Fallback: use job queue
+    const { createJob } = await import('../worker/job-queue.js');
+    await createJob({
+      type: 'generate_proposal',
+      payload: { caseId, reason: 'user_requested_analysis' },
+    });
+
+    return { ok: true, data: { success: true, mode: 'job-queue' } };
   });
 
   // POST /cases/:caseId/proposals/regenerate

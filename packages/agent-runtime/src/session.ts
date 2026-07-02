@@ -1,19 +1,27 @@
 import type { CaseId } from '@pkws/shared';
-import type { CaseSession, Message, SessionSnapshot } from './types.js';
+import type { CaseSession, Message, SessionSnapshot, SessionPersistence } from './types.js';
 import { DEFAULTS } from './types.js';
 
 /**
  * SessionManager maintains the in-memory Map<caseId, CaseSession>.
- * Handles creation, eviction, and lifecycle.
+ * Handles creation, eviction, and persistence to SQLite.
  */
 export class SessionManager {
   private activeCases = new Map<string, CaseSession>();
   private readonly maxSessions: number;
   private readonly timeoutMs: number;
+  private persistence: SessionPersistence | null = null;
 
   constructor(opts?: { maxActiveSessions?: number; sessionTimeoutMinutes?: number }) {
     this.maxSessions = opts?.maxActiveSessions ?? DEFAULTS.maxActiveSessions;
     this.timeoutMs = (opts?.sessionTimeoutMinutes ?? DEFAULTS.sessionTimeoutMinutes) * 60 * 1000;
+  }
+
+  /**
+   * Enable persistence via the SessionPersistence interface.
+   */
+  enablePersistence(persistence: SessionPersistence): void {
+    this.persistence = persistence;
   }
 
   /**
@@ -64,8 +72,8 @@ export class SessionManager {
 
   /**
    * Evict sessions that have been inactive beyond the timeout.
-   * Also evicts the least recently used if we exceed maxSessions.
-   * Returns the list of evicted caseIds so caller can persist them.
+   * Persists evicted sessions to SQLite if persistence is enabled.
+   * Returns the list of evicted sessions so caller can handle them.
    */
   evictStale(): CaseSession[] {
     const now = Date.now();
@@ -96,6 +104,22 @@ export class SessionManager {
         const [caseId, session] = entries[i];
         this.activeCases.delete(caseId);
         evicted.push(session);
+      }
+    }
+
+    // Persist evicted sessions (fire-and-forget)
+    if (this.persistence) {
+      for (const session of evicted) {
+        this.persistence.save(session.caseId, {
+          messages: session.messages,
+          compressedSummary: session.compressedSummary ?? null,
+          turnCount: session.turnCount,
+          totalTokens: session.totalTokens,
+          compressionEpoch: session.compressionEpoch,
+          awaitingUserInput: session.awaitingUserInput,
+        }).catch(err => {
+          console.error(`[SessionManager] Failed to persist evicted session ${session.caseId}:`, err);
+        });
       }
     }
 
@@ -153,5 +177,50 @@ export class SessionManager {
     session.lastActiveAt = new Date();
     // Rough token estimate: ~4 chars per token
     session.totalTokens += Math.ceil(content.length / 4);
+  }
+
+  /**
+   * Restore a session from SQLite.
+   * Checks in-memory first, then persistence.
+   * Returns null if no session exists.
+   */
+  async restoreSession(caseId: CaseId, init?: Partial<Pick<CaseSession, 'systemPrompt' | 'workspaceRules' | 'caseInstructions'>>): Promise<CaseSession | null> {
+    // Already in memory?
+    const existing = this.activeCases.get(caseId);
+    if (existing) {
+      existing.lastActiveAt = new Date();
+      return existing;
+    }
+
+    // Try restoring from persistence
+    if (this.persistence) {
+      const saved = await this.persistence.load(caseId);
+      if (saved) {
+        const session: CaseSession = {
+          caseId,
+          messages: saved.messages,
+          turnCount: saved.turnCount,
+          totalTokens: saved.totalTokens,
+          systemPrompt: init?.systemPrompt ?? '',
+          workspaceRules: init?.workspaceRules ?? [],
+          caseInstructions: init?.caseInstructions ?? '',
+          awaitingUserInput: saved.awaitingUserInput,
+          hasNewUserInput: false,
+          lastActiveAt: new Date(),
+          compressionEpoch: saved.compressionEpoch,
+          compressedSummary: saved.compressedSummary ?? undefined,
+        };
+
+        this.activeCases.set(caseId, session);
+
+        // Remove from persistence (now in memory)
+        await this.persistence.delete(caseId);
+
+        console.log(`[SessionManager] Restored session ${caseId} from persistence (${saved.messages.length} messages)`);
+        return session;
+      }
+    }
+
+    return null;
   }
 }

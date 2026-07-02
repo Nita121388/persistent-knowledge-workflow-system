@@ -10,9 +10,10 @@
 
 export { AgentRuntime } from './runtime.js';
 export type { AgentRuntimeOptions } from './types.js';
+export type { WsEvent } from './runtime.js';
 
 export { SessionManager } from './session.js';
-export type { CaseSession, Message, AgentInfo, CliResult, SessionSnapshot } from './types.js';
+export type { CaseSession, Message, AgentInfo, CliResult, SessionSnapshot, SessionPersistence } from './types.js';
 export { Action, DEFAULTS } from './types.js';
 
 export { Scheduler, decideAction } from './scheduler.js';
@@ -24,6 +25,17 @@ export { runCliAgent, verifyCli, getAgentWorkDir } from './cli-runner.js';
 export type { CliRunnerOptions } from './cli-runner.js';
 
 export { detectAvailableAgents, resolveCliPath, isAnyAgentAvailable } from './agent-detect.js';
+
+export { createPersistence } from './persistence.js';
+
+export { logger } from './logger.js';
+export type { LogLevel, LogCategory, LogEntry } from './logger.js';
+
+export { parseCliOutput } from './output-parser.js';
+export type { CliProposal, CliPatch, CliPatchOperation, ParsedCliOutput } from './output-parser.js';
+
+export { writeProposal, writePatch, recordAiTurn } from './output-writer.js';
+export type { OutputWriterOptions } from './output-writer.js';
 
 /**
  * Convenience factory: create and start an AgentRuntime in one call.
