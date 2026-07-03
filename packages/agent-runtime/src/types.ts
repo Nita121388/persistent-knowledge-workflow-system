@@ -92,7 +92,7 @@ export interface AgentRuntimeOptions {
 export interface SessionPersistence {
   /** Save a session's state to persistent storage */
   save(caseId: CaseId, data: {
-    messages: Message[];
+    recentMessages?: Message[];
     compressedSummary: string | null;
     turnCount: number;
     totalTokens: number;

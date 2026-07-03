@@ -60,10 +60,16 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
 
   const startTime = Date.now();
 
+  // On Windows, npm wrappers need shell for execution
+  const isWindows = process.platform === 'win32';
+  const spawnCmd = isWindows ? process.env.COMSPEC || 'cmd.exe' : cliPath;
+  const spawnArgs = isWindows ? ['/c', cliPath, '--print', taskPrompt] : ['--print', taskPrompt];
+
   return new Promise<CliResult>((resolve) => {
-    const child = spawn(cliPath, ['--print', taskPrompt], {
+    const child = spawn(spawnCmd, spawnArgs, {
       cwd: workDir,
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: isWindows,
       env: {
         ...process.env,
         ...envVars,
@@ -141,10 +147,16 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
  * Verify that a CLI is executable by checking its version.
  */
 export async function verifyCli(cliPath: string): Promise<boolean> {
+  // On Windows, npm wrappers are shell scripts (.cmd or .ps1), not standalone binaries.
+  // To verify them we need to run through the shell.
+  const isWindows = process.platform === 'win32';
+  const command = isWindows ? ['cmd', '/c', cliPath, '--version'] : [cliPath, '--version'];
+
   return new Promise((resolve) => {
-    const child = spawn(cliPath, ['--version'], {
+    const child = spawn(command[0], command.slice(1), {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10_000,
+      shell: isWindows,
     });
 
     let output = '';

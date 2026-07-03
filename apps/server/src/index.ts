@@ -4,6 +4,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import { initStorage, getDb, schema } from '@pkws/storage';
 import { eq } from 'drizzle-orm';
 import { logRoutes } from './routes/logs.js';
+import { workerRoutes } from './routes/worker.js';
 import { settingsRoutes } from './routes/settings.js';
 import { caseRoutes } from './routes/cases.js';
 import { inboxRoutes } from './routes/inbox.js';
@@ -28,9 +29,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export let agentRuntime: AgentRuntime | null = null;
 
 /**
+ * Allow route handlers to hot-swap the agent runtime reference.
+ * Since ESM `import` binds are read-only, routes import this setter
+ * to reassign the mutable module variable that `agentRuntime` points to.
+ */
+export function setAgentRuntime(runtime: AgentRuntime | null): void {
+  agentRuntime = runtime;
+}
+
+/**
  * Load settings from the database (if initialized).
  */
-async function loadSettings(): Promise<Settings | null> {
+export async function loadSettings(): Promise<Settings | null> {
   try {
     const db = getDb();
     const rows = await db.select().from(schema.settings).all();
@@ -144,6 +154,7 @@ async function main() {
   await app.register(agentRuntimeRoutes, { prefix: '/api' });
   await app.register(agentRuntimeWsRoutes, { prefix: '/api' });
   await app.register(logRoutes, { prefix: '/api' });
+  await app.register(workerRoutes, { prefix: '/api' });
 
   const port = process.env.PORT ? parseInt(process.env.PORT) : 3731;
   const host = process.env.HOST || '0.0.0.0';

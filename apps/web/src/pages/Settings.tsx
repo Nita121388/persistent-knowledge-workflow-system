@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api.js';
-import { Plus, Trash2, Pencil, Settings2, Database, Bot, BookText, FolderOpen, ExternalLink, CheckCircle2, Cpu, RefreshCw, BookOpen } from 'lucide-react';
+import { Plus, Trash2, Pencil, Settings2, Database, Bot, BookText, FolderOpen, ExternalLink, CheckCircle2, Cpu, RefreshCw, BookOpen, Power, PowerOff, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
 type Tab = 'general' | 'ai' | 'vault' | 'rules' | 'agent-runtime';
@@ -79,6 +79,14 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
   const [editingRule, setEditingRule] = useState<{
     id: string; title: string; content: string; enabled: boolean; priority: number;
   } | null>(null);
+
+  const toggleAgentMutation = useMutation({
+    mutationFn: () => apiPost('/agent-runtime/toggle'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      queryClient.invalidateQueries({ queryKey: ['agent-runtime-status'] });
+    },
+  });
 
   const tabs = [
     { key: 'general' as Tab, label: 'General', icon: Settings2 },
@@ -389,11 +397,27 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
             {settings ? (
               <div className="space-y-4">
                 <div className="flex items-center gap-2 text-sm">
-                  <div className={cn('w-2 h-2 rounded-full', settings.agentRuntimeEnabled ? 'bg-green-400' : 'bg-gray-300')} />
-                  <span className="text-gray-500">Status:</span>
-                  <span className={cn('font-medium', settings.agentRuntimeEnabled ? 'text-green-700' : 'text-gray-500')}>
-                    {settings.agentRuntimeEnabled ? 'Enabled' : 'Disabled'}
-                  </span>
+                  <button
+                    onClick={() => toggleAgentMutation.mutate()}
+                    disabled={toggleAgentMutation.isPending}
+                    className={cn(
+                      'flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors border',
+                      settings.agentRuntimeEnabled
+                        ? 'bg-green-50 text-green-700 hover:bg-green-100 border-green-200'
+                        : 'bg-gray-50 text-gray-500 hover:bg-gray-100 border-gray-200'
+                    )}
+                  >
+                    {toggleAgentMutation.isPending ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : settings.agentRuntimeEnabled ? (
+                      <Power className="w-4 h-4" />
+                    ) : (
+                      <PowerOff className="w-4 h-4" />
+                    )}
+                    <span className={cn('font-medium', settings.agentRuntimeEnabled ? 'text-green-700' : 'text-gray-500')}>
+                      {settings.agentRuntimeEnabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </button>
                 </div>
 
                 {/* Available Agents */}

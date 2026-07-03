@@ -139,6 +139,14 @@ export function AgentRuntimeDashboardPage() {
 
   const runtimeRunning = status?.running ?? false;
 
+  // Fetch worker status
+  const { data: workerData } = useQuery({
+    queryKey: ['worker-status'],
+    queryFn: () => apiGet<any>('/worker/status'),
+    refetchInterval: 5000,
+  });
+  const workerStatus = workerData?.ok ? workerData.data : null;
+
   const eventIcon = (event: WsEvent) => {
     switch (event.type) {
       case 'turn_started': return <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />;
@@ -250,6 +258,50 @@ export function AgentRuntimeDashboardPage() {
               <div className="text-lg font-semibold text-blue-600">{status?.queueStats?.waiting ?? 0}</div>
             </div>
           </div>
+
+          {/* Job Queue Status (visible even when Agent Runtime is stopped) */}
+          {!runtimeRunning && (
+            <div className="bg-white rounded-xl border border-gray-200 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <RefreshCw className="w-4 h-4 text-amber-500" />
+                <h2 className="font-semibold">Job Queue</h2>
+              </div>
+              {workerStatus ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-gray-50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-semibold">{workerStatus.queueLength}</div>
+                    <div className="text-xs text-gray-500">Queued</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-semibold">{workerStatus.runningCount}</div>
+                    <div className="text-xs text-gray-500">Running</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-semibold">{workerStatus.recentFailed?.length ?? 0}</div>
+                    <div className="text-xs text-red-500">Failed</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-semibold">{workerStatus.recentSucceeded?.length ?? 0}</div>
+                    <div className="text-xs text-green-500">Succeeded</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-gray-400">Loading worker status...</div>
+              )}
+              {workerStatus?.recentFailed?.length > 0 && (
+                <div className="mt-3">
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Recent Failures</h3>
+                  <div className="space-y-1">
+                    {workerStatus.recentFailed.slice(0, 3).map((j: any) => (
+                      <div key={j.id} className="text-xs text-red-600 bg-red-50 rounded px-2 py-1">
+                        {j.type}: {j.errorMessage?.slice(0, 100)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Live Events */}
           <div className="bg-white rounded-xl border border-gray-200">

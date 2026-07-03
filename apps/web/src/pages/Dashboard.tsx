@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { apiGet, apiPost } from '../lib/api.js';
 import { cn, timeAgo, getStatusColor } from '../lib/utils.js';
+import { useToast } from '../components/Toast.js';
 import type { CaseListItem } from '@pkws/shared';
-import { Inbox, AlertCircle, CheckCircle2, Archive, Clock, RefreshCw } from 'lucide-react';
+import { Inbox, AlertCircle, CheckCircle2, Archive, Clock, RefreshCw, Loader2 } from 'lucide-react';
 
 const QUEUES = [
   { key: 'inbox', label: 'Inbox', icon: Inbox, desc: 'New captures' },
@@ -13,9 +14,26 @@ const QUEUES = [
   { key: 'closed', label: 'Closed', icon: Archive, desc: 'Done / Dropped' },
 ] as const;
 
+// Maximum time to poll for scan job completion (30 seconds)
+const SCAN_POLL_TIMEOUT = 30_000;
+const SCAN_POLL_INTERVAL = 1_500;
+
+interface ScanJobResult {
+  scannedCount?: number;
+  createdCount?: number;
+  skippedCount?: number;
+  errorCount?: number;
+  newCaseIds?: string[];
+}
+
 export function Dashboard() {
   const [activeQueue, setActiveQueue] = useState<string>('review');
   const queryClient = useQueryClient();
+  const toast = useToast();
+
+  // Track scanning state for anti-duplicate
+  const [isScanning, setIsScanning] = useState(false);
+  const scanningRef = useRef(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ['cases', activeQueue],
@@ -24,11 +42,118 @@ export function Dashboard() {
   });
 
   const scanMutation = useMutation({
-    mutationFn: () => apiPost('/inbox/scan', { mode: 'incremental' }),
-    onSuccess: () => {
+    mutationFn: () => apiPost<any>('/inbox/scan', { mode: 'incremental' }),
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['cases'] });
+
+      const jobId = result.ok ? result.data?.jobId : null;
+      const pendingFiles = result.ok ? result.data?.pendingFiles : 0;
+
+      // Start polling for scan job result
+      if (jobId) {
+        toast.info(pendingFiles > 0
+          ? `Found ${pendingFiles} file(s) in inbox, scanning...`
+          : 'Scanning inbox for new files...');
+        pollScanJob(jobId);
+      }
+    },
+    onError: (err: any) => {
+      setIsScanning(false);
+      scanningRef.current = false;
+      toast.error(`Scan failed: ${err.message || 'Unknown error'}`);
+    },
+    onSettled: () => {
+      // Do NOT reset isScanning here — polling keeps it true until done
     },
   });
+
+  const pollScanJob = useCallback((jobId: string) => {
+    const startTime = Date.now();
+
+    const poll = async () => {
+      // Timeout check
+      if (Date.now() - startTime > SCAN_POLL_TIMEOUT) {
+        setIsScanning(false);
+        scanningRef.current = false;
+        toast.info('Scan is taking longer than expected. Refresh to see new cases.');
+        return;
+      }
+
+      try {
+        const res = await apiGet<any>(`/jobs/${jobId}`);
+        if (res.ok && res.data) {
+          const status = res.data.status;
+
+          if (status === 'succeeded') {
+            // Try to parse result
+            const resultJson = res.data.resultJson;
+            let result: ScanJobResult = {};
+            if (resultJson) {
+              try { result = JSON.parse(resultJson); } catch {}
+            }
+
+            const created = result.createdCount ?? 0;
+            const skipped = result.skippedCount ?? 0;
+
+            // Show appropriate toast
+            if (created > 0) {
+              toast.success(`Scan complete: ${created} new task(s) created${skipped > 0 ? `, ${skipped} skipped` : ''}`);
+            } else {
+              toast.info(`Scan complete — no new files found${skipped > 0 ? ` (${skipped} already pending)` : ''}`);
+            }
+
+            // Refresh case list again to show new data
+            queryClient.invalidateQueries({ queryKey: ['cases'] });
+
+            // Also auto-switch to inbox queue if new cases were created
+            if (created > 0 && activeQueue !== 'inbox') {
+              setTimeout(() => setActiveQueue('inbox'), 100);
+            }
+
+            setIsScanning(false);
+            scanningRef.current = false;
+            return;
+          }
+
+          if (status === 'failed') {
+            setIsScanning(false);
+            scanningRef.current = false;
+            toast.error(`Scan failed: ${res.data.errorMessage || 'Unknown error'}`);
+            return;
+          }
+
+          // Still running — poll again
+          setTimeout(poll, SCAN_POLL_INTERVAL);
+        } else {
+          // Job endpoint returned error — give up polling
+          setIsScanning(false);
+          scanningRef.current = false;
+          setTimeout(() => {
+            queryClient.invalidateQueries({ queryKey: ['cases'] });
+          }, 2000);
+        }
+      } catch {
+        // Network error — retry after interval
+        setTimeout(poll, SCAN_POLL_INTERVAL);
+      }
+    };
+
+    poll();
+  }, [queryClient, toast, activeQueue]);
+
+  const handleScan = useCallback(() => {
+    // Anti-duplicate: use ref to prevent race conditions with React strict mode
+    if (scanningRef.current) return;
+    scanningRef.current = true;
+    setIsScanning(true);
+    scanMutation.mutate(undefined, {
+      onError: () => {
+        // Already handled in mutation onError — but ensure ref is reset if onSettled isn't called
+        scanningRef.current = false;
+        setIsScanning(false);
+      },
+    });
+  }, [scanMutation]);
 
   const cases = data?.ok ? data.data : [];
 
@@ -37,12 +162,26 @@ export function Dashboard() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Knowledge Tasks</h1>
         <button
-          onClick={() => scanMutation.mutate()}
-          disabled={scanMutation.isPending}
-          className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+          onClick={handleScan}
+          disabled={isScanning}
+          className={cn(
+            'flex items-center gap-2 px-3 py-2 text-sm border rounded-lg transition-all',
+            isScanning
+              ? 'bg-gray-100 border-gray-200 text-gray-500 cursor-not-allowed'
+              : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-pkws-300',
+          )}
         >
-          <RefreshCw className={cn('w-4 h-4', scanMutation.isPending && 'animate-spin')} />
-          Scan Inbox
+          {isScanning ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin text-pkws-500" />
+              <span>Scanning...</span>
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-4 h-4" />
+              <span>Scan Inbox</span>
+            </>
+          )}
         </button>
       </div>
 
@@ -80,9 +219,28 @@ export function Dashboard() {
             <CheckCircle2 className="w-12 h-12 mx-auto mb-3 text-gray-300" />
             <p className="text-gray-500">No cases in {activeQueue}</p>
             {activeQueue === 'inbox' && (
-              <p className="text-sm text-gray-400 mt-1">
-                Use Obsidian Web Clipper to capture content first
-              </p>
+              <div className="mt-3 space-y-1">
+                <p className="text-sm text-gray-400">
+                  Use Obsidian Web Clipper to capture content first
+                </p>
+                <button
+                  onClick={handleScan}
+                  disabled={isScanning}
+                  className={cn(
+                    'mt-3 inline-flex items-center gap-2 px-4 py-2 text-sm rounded-lg border transition-all',
+                    isScanning
+                      ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                      : 'bg-white border-pkws-200 text-pkws-600 hover:bg-pkws-50',
+                  )}
+                >
+                  {isScanning ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                  {isScanning ? 'Scanning...' : 'Scan Inbox Now'}
+                </button>
+              </div>
             )}
           </div>
         )}

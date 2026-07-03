@@ -155,10 +155,22 @@ async function handleScanInbox(job: Job) {
 
   const files = await scanMarkdownFiles(settings.inboxPath);
 
+  // Track scan statistics
+  let scannedCount = 0;
+  let createdCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+  const newCases: string[] = [];
+
   for (const filePath of files) {
+    scannedCount++;
+
     // Check if already processed
     const content = await readMarkdown(filePath);
-    if (!content) continue;
+    if (!content) {
+      errorCount++;
+      continue;
+    }
 
     const existingPkwsId = content.data.pkws_id as string | undefined;
 
@@ -205,7 +217,7 @@ async function handleScanInbox(job: Job) {
     }
 
     // Check if there's already a pending case for this anchor
-    const pendingStatuses = ['Captured', 'Analyzing', 'ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved', 'Applying'];
+    const pendingStatuses: any = ['Captured', 'Analyzing', 'ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved', 'Applying'];
     const existingCase = await db.select()
       .from(schema.cases)
       .where(
@@ -216,7 +228,10 @@ async function handleScanInbox(job: Job) {
       )
       .get();
 
-    if (existingCase) continue; // Skip if already has pending case
+    if (existingCase) {
+      skippedCount++;
+      continue; // Skip if already has pending case
+    }
 
     // Create artifact
     const artifactId = genArtifactId();
@@ -239,6 +254,7 @@ async function handleScanInbox(job: Job) {
 
     // Create case
     const caseId = genCaseId();
+    newCases.push(caseId);
     db.insert(schema.cases).values({
       id: caseId,
       anchorId,
@@ -249,6 +265,7 @@ async function handleScanInbox(job: Job) {
       createdAt: now,
       updatedAt: now,
     }).run();
+    createdCount++;
 
     // Create case_created event
     db.insert(schema.timelineEvents).values({
@@ -274,6 +291,38 @@ async function handleScanInbox(job: Job) {
         payload: { caseId },
       });
     }
+  }
+
+  // Record scan summary
+  const summaryMessage = `Scan inbox: ${createdCount} created, ${skippedCount} skipped (already pending), ${errorCount} errors, out of ${scannedCount} files`;
+  console.log(`  ${summaryMessage}`);
+
+  // Store result on the job for frontend polling
+  const summaryPayload = JSON.stringify({
+    scannedCount,
+    createdCount,
+    skippedCount,
+    errorCount,
+    newCaseIds: newCases,
+  });
+  db.update(schema.jobs)
+    .set({ resultJson: summaryPayload })
+    .where(eq(schema.jobs.id, job.id))
+    .run();
+
+  // Create a scan_completed timeline event (system-level, not per-case)
+  try {
+    db.insert(schema.timelineEvents).values({
+      id: genEventId(),
+      caseId: '',
+      type: 'scan_completed',
+      actor: 'system',
+      summary: summaryMessage,
+      dataJson: summaryPayload,
+      createdAt: new Date().toISOString(),
+    }).run();
+  } catch {
+    // Some DB schemas require a valid caseId — this is best-effort
   }
 }
 
@@ -305,6 +354,10 @@ async function handleGenerateProposal(job: Job) {
     .where(eq(schema.cases.id, caseId))
     .get();
   if (!caseRow) throw new Error(`Case not found: ${caseId}`);
+
+  // If case is in Analyzing or Captured, proceed; if already has a proposal, it's a regenerate
+  const isAnalyzing = caseRow.status === 'Analyzing';
+  const isCaptured = caseRow.status === 'Captured';
 
   const artifact = await db.select()
     .from(schema.artifacts)

@@ -13,17 +13,32 @@ import { Layout } from './components/Layout.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 
 export default function App() {
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, failureCount } = useQuery({
     queryKey: ['settings'],
     queryFn: () => apiGet('/settings'),
-    retry: 1,
+    retry: 3,
+    retryDelay: 1000,
   });
 
   if (isLoading) return <LoadingScreen />;
 
-  // If no settings found, show setup wizard
-  if (isError || !data?.ok) {
+  // Only show setup wizard if we've definitively failed (not just a transient error)
+  if ((isError || !data?.ok) && failureCount >= 3) {
     return <SetupWizard />;
+  }
+
+  // If settings API fails but we haven't exhausted retries, show a friendly message
+  // instead of jumping to setup
+  if (isError || !data?.ok) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="w-10 h-10 mx-auto mb-4 border-4 border-pkws-300 border-t-pkws-600 rounded-full animate-spin" />
+          <p className="text-gray-500">Connecting to server...</p>
+          <p className="text-xs text-gray-400 mt-1">Make sure the backend server is running</p>
+        </div>
+      </div>
+    );
   }
 
   return (

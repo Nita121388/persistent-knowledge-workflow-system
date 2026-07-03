@@ -418,6 +418,59 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, data: { success: true, mode: 'job-queue' } };
   });
 
+  // POST /cases/:caseId/cancel-analysis — cancel an ongoing analysis
+  app.post('/cases/:caseId/cancel-analysis', async (request, reply) => {
+    const { caseId } = request.params as { caseId: string };
+    const db = getDb();
+
+    const caseRow = await db.select()
+      .from(schema.cases)
+      .where(eq(schema.cases.id, caseId))
+      .get();
+
+    if (!caseRow) {
+      return reply.status(404).send({ ok: false, error: { code: 'NOT_FOUND', message: 'Case not found' } });
+    }
+
+    if (caseRow.status !== 'Analyzing') {
+      return reply.status(400).send({ ok: false, error: { code: 'WRONG_STATUS', message: 'Only Analyzing cases can be cancelled' } });
+    }
+
+    // Update status back to Captured
+    db.update(schema.cases)
+      .set({ status: 'Captured', updatedAt: new Date().toISOString() })
+      .where(eq(schema.cases.id, caseId))
+      .run();
+
+    // Record timeline event
+    db.insert(schema.timelineEvents).values({
+      id: genEventId(),
+      caseId,
+      type: 'error_occurred',
+      actor: 'user',
+      summary: 'User cancelled analysis',
+      createdAt: new Date().toISOString(),
+    }).run();
+
+    // Cancel any pending jobs for this case
+    db.update(schema.jobs)
+      .set({ status: 'cancelled', finishedAt: new Date().toISOString() })
+      .where(
+        and(
+          eq(schema.jobs.type, 'generate_proposal'),
+          eq(schema.jobs.status, 'queued'),
+        )
+      )
+      .run();
+
+    // If Agent Runtime is running, detach the case
+    if (agentRuntime) {
+      await agentRuntime.detachCase(caseId);
+    }
+
+    return { ok: true, data: { success: true } };
+  });
+
   // POST /cases/:caseId/proposals/regenerate
   app.post('/cases/:caseId/proposals/regenerate', async (request, reply) => {
     const { caseId } = request.params as { caseId: string };

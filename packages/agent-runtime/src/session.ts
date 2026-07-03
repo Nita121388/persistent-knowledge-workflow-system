@@ -111,7 +111,7 @@ export class SessionManager {
     if (this.persistence) {
       for (const session of evicted) {
         this.persistence.save(session.caseId, {
-          messages: session.messages,
+          recentMessages: session.messages,
           compressedSummary: session.compressedSummary ?? null,
           turnCount: session.turnCount,
           totalTokens: session.totalTokens,

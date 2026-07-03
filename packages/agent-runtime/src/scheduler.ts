@@ -290,6 +290,20 @@ export class Scheduler {
             : (result.stdout.trim() || '*(no output)*');
           this.sessionManager.appendMessage(caseId, 'assistant', assistantContent);
 
+          // Store AI-generated context summary if available
+          if (parsed.contextSummary) {
+            const session = this.sessionManager.get(caseId);
+            if (session) {
+              session.compressedSummary = parsed.contextSummary.summary;
+              if (parsed.contextSummary.keyPoints?.length) {
+                session.compressedSummary += '\n\nKey points:\n- ' + parsed.contextSummary.keyPoints.join('\n- ');
+              }
+              if (parsed.contextSummary.openQuestions?.length) {
+                session.compressedSummary += '\n\nOpen questions:\n- ' + parsed.contextSummary.openQuestions.join('\n- ');
+              }
+            }
+          }
+
           // Check if the agent is asking for user input
           const asksForInput = result.stdout.toLowerCase().includes('ask_user')
             || result.stdout.toLowerCase().includes('please provide')

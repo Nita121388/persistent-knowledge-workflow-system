@@ -38,6 +38,11 @@ export function CaseDetailPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
   });
 
+  const cancelAnalysisMutation = useMutation({
+    mutationFn: () => apiPost(`/cases/${caseId}/cancel-analysis`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
+  });
+
   const commentMutation = useMutation({
     mutationFn: (comment: string) => apiPost(`/cases/${caseId}/comment`, { comment, updateInstructionSummary: true }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
@@ -114,6 +119,7 @@ export function CaseDetailPage() {
 
   const canModify = ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
   const isCaptured = c.status === 'Captured';
+  const isAnalyzing = c.status === 'Analyzing';
   const showProposal = proposal && ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
   const showPatch = patch && patch.status === 'preview';
 
@@ -251,6 +257,23 @@ export function CaseDetailPage() {
             className="flex items-center gap-1.5 px-3 py-2 text-sm bg-red-50 text-red-700 rounded-lg hover:bg-red-100 border border-red-200"
           >
             <Trash2 className="w-4 h-4" /> Drop
+          </button>
+        </div>
+      )}
+
+      {/* Analyzing state - show progress + cancel */}
+      {isAnalyzing && (
+        <div className="flex flex-wrap gap-2 mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="flex items-center gap-2 text-sm text-blue-700 flex-1">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>AI is analyzing this case...</span>
+          </div>
+          <button
+            onClick={() => cancelAnalysisMutation.mutate()}
+            disabled={cancelAnalysisMutation.isPending}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white text-red-600 rounded-lg hover:bg-red-50 border border-red-200 transition-colors"
+          >
+            <XCircle className="w-4 h-4" /> Cancel
           </button>
         </div>
       )}
@@ -503,7 +526,18 @@ export function CaseDetailPage() {
 
       {/* Timeline */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium mb-3">Timeline</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium">Timeline</h3>
+          <a
+            href={`/logs?caseId=${caseId}`}
+            className="flex items-center gap-1 text-xs text-gray-400 hover:text-pkws-600 transition-colors"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <ExternalLink className="w-3 h-3" />
+            View Logs
+          </a>
+        </div>
         <div className="space-y-3">
           {timeline.length === 0 && (
             <p className="text-sm text-gray-400 text-center py-4">No events yet</p>

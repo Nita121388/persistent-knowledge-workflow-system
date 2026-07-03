@@ -8,10 +8,16 @@ export async function apiGet<T>(path: string): Promise<ApiResponse<T>> {
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
+  const headers: Record<string, string> = {};
+  let bodyStr: string | undefined;
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    bodyStr = JSON.stringify(body);
+  }
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
+    headers,
+    body: bodyStr,
   });
   return res.json();
 }

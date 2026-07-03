@@ -1,6 +1,8 @@
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '../lib/utils.js';
-import { LayoutDashboard, Settings2, Cpu, ScrollText, Github } from 'lucide-react';
+import { LayoutDashboard, Settings2, Cpu, ScrollText, Play, Square, Loader2 } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiGet, apiPost } from '../lib/api.js';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -11,6 +13,22 @@ const NAV_ITEMS = [
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
+  const queryClient = useQueryClient();
+
+  const { data: settingsData } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => apiGet<any>('/settings'),
+    refetchInterval: 10000,
+  });
+  const isAgentEnabled = settingsData?.ok ? !!settingsData.data?.agentRuntimeEnabled : false;
+
+  const toggleMutation = useMutation({
+    mutationFn: () => apiPost('/agent-runtime/toggle'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      queryClient.invalidateQueries({ queryKey: ['agent-runtime-status'] });
+    },
+  });
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -43,6 +61,26 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </nav>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => toggleMutation.mutate()}
+              disabled={toggleMutation.isPending}
+              className={cn(
+                'flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors border',
+                isAgentEnabled
+                  ? 'bg-green-50 text-green-700 hover:bg-green-100 border-green-200'
+                  : 'bg-gray-50 text-gray-500 hover:bg-gray-100 border-gray-200'
+              )}
+              title={isAgentEnabled ? 'Disable Agent Runtime' : 'Enable Agent Runtime'}
+            >
+              {toggleMutation.isPending ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : isAgentEnabled ? (
+                <Play className="w-3 h-3 fill-green-600" />
+              ) : (
+                <Square className="w-3 h-3" />
+              )}
+              <span className="hidden sm:inline">{isAgentEnabled ? 'Agent ON' : 'Agent OFF'}</span>
+            </button>
             <span className="text-xs text-gray-400">v0.1.0</span>
           </div>
         </div>

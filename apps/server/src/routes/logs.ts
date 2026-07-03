@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { logger } from '@pkws/agent-runtime';
-import type { LogLevel, LogCategory } from '@pkws/agent-runtime';
+import { getDb, getClient, schema } from '@pkws/storage';
+import { desc, eq, lt, sql } from 'drizzle-orm';
 
 /**
  * Log query API.
@@ -13,23 +13,56 @@ export const logRoutes: FastifyPluginAsync = async (app) => {
   app.get('/logs', async (request) => {
     const query = request.query as Record<string, string>;
 
-    const levels = query.level
-      ? query.level.split(',').filter(Boolean) as LogLevel[]
-      : undefined;
-    const categories = query.category
-      ? query.category.split(',').filter(Boolean) as LogCategory[]
-      : undefined;
     const limit = Math.min(parseInt(query.limit || '100'), 500);
     const offset = parseInt(query.offset || '0');
-    const caseId = query.caseId || undefined;
-    const search = query.search || undefined;
+    const levelFilter = query.level || '';
+    const categoryFilter = query.category || '';
+    const caseId = query.caseId || '';
+    const search = query.search || '';
 
-    const result = await logger.query({ levels, categories, limit, offset, caseId, search });
+    try {
+      const client = getClient();
+      const conditions: string[] = [];
+      const params: any[] = [];
 
-    return {
-      ok: true,
-      data: result,
-    };
+      if (levelFilter) {
+        const levels = levelFilter.split(',').filter(Boolean);
+        conditions.push(`level IN (${levels.map(() => '?').join(',')})`);
+        params.push(...levels);
+      }
+      if (categoryFilter) {
+        const categories = categoryFilter.split(',').filter(Boolean);
+        conditions.push(`category IN (${categories.map(() => '?').join(',')})`);
+        params.push(...categories);
+      }
+      if (caseId) {
+        conditions.push('case_id = ?');
+        params.push(caseId);
+      }
+      if (search) {
+        conditions.push('message LIKE ?');
+        params.push(`%${search}%`);
+      }
+
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      // Use raw SQLite client for reliable results
+      const totalResult = client.get<{ count: number }>(`SELECT COUNT(*) as count FROM log_entries ${where}`, params);
+      const rows = client.all<any>(`SELECT * FROM log_entries ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+
+      return {
+        ok: true,
+        data: {
+          entries: rows || [],
+          total: totalResult?.count ?? 0,
+        },
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        error: { code: 'QUERY_ERROR', message: err.message },
+      };
+    }
   });
 
   // DELETE /logs — clear old log entries
@@ -38,16 +71,12 @@ export const logRoutes: FastifyPluginAsync = async (app) => {
     const before = query.before || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     try {
-      const { getDb, schema } = await import('@pkws/storage');
-      const { lt, sql } = await import('drizzle-orm');
-      const db = getDb();
-      const result = db.delete(schema.logEntries)
-        .where(lt(schema.logEntries.timestamp, before))
-        .run();
+      const client = getClient();
+      const result = client.run('DELETE FROM log_entries WHERE timestamp < ?', [before]);
 
       return {
         ok: true,
-        data: { deletedCount: result.changes ?? 0, before },
+        data: { deletedCount: result.rows, before },
       };
     } catch (err: any) {
       return {

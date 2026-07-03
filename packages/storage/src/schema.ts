@@ -192,7 +192,11 @@ export const jobs = sqliteTable('jobs', {
 
 export const agentSessions = sqliteTable('agent_sessions', {
   caseId: text('case_id').primaryKey().notNull().references(() => cases.id),
-  messagesJson: text('messages_json').notNull(),
+  /** @deprecated 不再写入，仅用于旧数据兼容 */
+  messagesJson: text('messages_json'),
+  /** 最近 N 条消息（JSON 字符串），保留最近交互上下文 */
+  recentMessagesJson: text('recent_messages_json'),
+  /** AI 生成的语义摘要，替代旧的粗暴截取方式 */
   compressedSummary: text('compressed_summary'),
   turnCount: integer('turn_count').notNull().default(0),
   totalTokens: integer('total_tokens').notNull().default(0),

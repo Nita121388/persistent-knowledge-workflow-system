@@ -207,7 +207,7 @@ export class AgentRuntime {
       const sessions = this.sessionManager.all();
       for (const session of sessions) {
         await this.options.persistence.save(session.caseId, {
-          messages: session.messages,
+          recentMessages: session.messages,
           compressedSummary: session.compressedSummary ?? null,
           turnCount: session.turnCount,
           totalTokens: session.totalTokens,

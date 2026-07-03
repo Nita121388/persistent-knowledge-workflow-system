@@ -55,11 +55,24 @@ export const CliPatchSchema = z.object({
 export type CliPatchOperation = z.infer<typeof CliPatchOperationSchema>;
 export type CliPatch = z.infer<typeof CliPatchSchema>;
 
+// ---- Context Summary JSON ----
+// Written by CLI agent to output/context-summary.json
+// Used to store AI-generated semantic summary instead of raw message truncation
+
+export const ContextSummarySchema = z.object({
+  summary: z.string().describe('语义摘要：之前的对话中最重要的结论、决策和上下文'),
+  keyPoints: z.array(z.string()).optional().describe('关键要点列表'),
+  openQuestions: z.array(z.string()).optional().describe('仍然未解决的问题'),
+});
+
+export type CliContextSummary = z.infer<typeof ContextSummarySchema>;
+
 // ---- Output Parser ----
 
 export interface ParsedCliOutput {
   proposal: CliProposal | null;
   patch: CliPatch | null;
+  contextSummary: CliContextSummary | null;
   rawText: string;
   errors: string[];
 }
@@ -75,6 +88,7 @@ export function parseCliOutput(
   const errors: string[] = [];
   let proposal: CliProposal | null = null;
   let patch: CliPatch | null = null;
+  let contextSummary: CliContextSummary | null = null;
 
   for (const file of outputFiles) {
     const filename = file.path.split(/[/\\]/).pop() || '';
@@ -96,6 +110,15 @@ export function parseCliOutput(
         errors.push(`patch-operations.json parse error: ${e.message}`);
       }
     }
+
+    if (filename === 'context-summary.json') {
+      try {
+        const json = JSON.parse(file.content);
+        contextSummary = ContextSummarySchema.parse(json);
+      } catch (e: any) {
+        errors.push(`context-summary.json parse error: ${e.message}`);
+      }
+    }
   }
 
   // Also try to extract proposal from stdout if no file was found
@@ -111,5 +134,5 @@ export function parseCliOutput(
     }
   }
 
-  return { proposal, patch, rawText: stdout, errors };
+  return { proposal, patch, contextSummary, rawText: stdout, errors };
 }

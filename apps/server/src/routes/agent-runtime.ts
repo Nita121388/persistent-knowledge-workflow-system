@@ -1,6 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { agentRuntime } from '../index.js';
+import { agentRuntime, setAgentRuntime, loadSettings } from '../index.js';
+import { getDb, schema } from '@pkws/storage';
+import { eq } from 'drizzle-orm';
 import { detectAvailableAgents, type AgentRuntime } from '@pkws/agent-runtime';
+import type { WsEvent } from '@pkws/agent-runtime';
+import { broadcastWsEvent } from '../ws-broadcast.js';
 
 /**
  * Agent Runtime status and control API.
@@ -8,6 +12,7 @@ import { detectAvailableAgents, type AgentRuntime } from '@pkws/agent-runtime';
  * GET  /api/agent-runtime/status           → current runtime status
  * GET  /api/agent-runtime/sessions         → full session list with message summaries
  * GET  /api/agent-runtime/available-agents → list of detected CLI agents
+ * POST /api/agent-runtime/toggle           → enable/disable Agent Runtime at runtime
  * POST /api/agent-runtime/sandbox          → update sandbox mode at runtime
  * POST /api/agent-runtime/clear-sessions   → clear all sessions
  * POST /api/agent-runtime/:caseId/retry    → retry a failed case
@@ -85,6 +90,89 @@ export const agentRuntimeRoutes: FastifyPluginAsync = async (app) => {
       ok: true,
       data: detectAvailableAgents(),
     };
+  });
+
+  // POST /agent-runtime/toggle — enable or disable Agent Runtime at runtime
+  // Updates the DB setting plus hot-starts or hot-stops the runtime process.
+  app.post('/agent-runtime/toggle', async (request, reply) => {
+    const db = getDb();
+    const existing = await db.select().from(schema.settings).all();
+    if (existing.length === 0) {
+      return reply.status(400).send({ ok: false, error: { code: 'NO_SETTINGS', message: 'Settings not found. Complete setup first.' } });
+    }
+
+    const current = !!existing[0]?.agentRuntimeEnabled;
+
+    if (current) {
+      // --- Stop Agent Runtime ---
+      console.log('[Toggle] Stopping Agent Runtime...');
+      const rt = agentRuntime; // grab the current ref before nulling
+      if (rt) {
+        await rt.stop();
+        console.log('[Toggle] Agent Runtime stop() completed');
+      }
+      setAgentRuntime(null);
+      db.update(schema.settings)
+        .set({ agentRuntimeEnabled: false, updatedAt: new Date().toISOString() })
+        .where(eq(schema.settings.id, existing[0].id))
+        .run();
+      console.log('[Toggle] Agent Runtime stopped');
+      return { ok: true, data: { enabled: false, message: 'Agent Runtime stopped' } };
+    }
+
+    // --- Start Agent Runtime ---
+    console.log('[Toggle] Starting Agent Runtime...');
+    const settings = await loadSettings();
+    if (!settings) {
+      return reply.status(400).send({ ok: false, error: { code: 'NO_SETTINGS', message: 'Settings not found' } });
+    }
+
+    try {
+      const { createPersistence, startAgentRuntime } = await import('@pkws/agent-runtime');
+      const persistence = createPersistence(getDb(), schema);
+
+      const runtime = await startAgentRuntime({
+        db: getDb(),
+        workspacePath: settings.workspacePath,
+        vaultPath: settings.vaultPath,
+        cliPath: settings.agentCliPath || undefined,
+        maxActiveSessions: settings.maxActiveSessions,
+        sessionTimeoutMinutes: settings.sessionTimeoutMinutes,
+        contextCompressThreshold: settings.contextCompressThreshold,
+        contextKeepRecentCount: settings.contextKeepRecentCount,
+        maxTokensPerSession: settings.maxTokensPerSession,
+        sandboxMode: settings.sandboxMode,
+        persistence,
+      });
+
+      // Wire up WebSocket broadcast
+      runtime.setWsBroadcast((event: WsEvent) => { broadcastWsEvent(event); });
+
+      // Log scheduler state before setting
+      const status = runtime.getStatus();
+      console.log('[Toggle] Runtime after start - scheduler:', status.running ? 'present' : 'MISSING');
+
+      setAgentRuntime(runtime);
+
+      db.update(schema.settings)
+        .set({ agentRuntimeEnabled: true, updatedAt: new Date().toISOString() })
+        .where(eq(schema.settings.id, existing[0].id))
+        .run();
+
+      console.log('[Toggle] Agent Runtime started successfully');
+      return { ok: true, data: { enabled: true, message: 'Agent Runtime started', debug: { running: status.running, cliPath: status.cliPath } } };
+    } catch (err: any) {
+      console.error('[Toggle] Failed to start Agent Runtime:', err);
+      // Roll back DB setting on failure
+      db.update(schema.settings)
+        .set({ agentRuntimeEnabled: false, updatedAt: new Date().toISOString() })
+        .where(eq(schema.settings.id, existing[0].id))
+        .run();
+      return reply.status(500).send({
+        ok: false,
+        error: { code: 'START_FAILED', message: `Failed to start Agent Runtime: ${err.message}` },
+      });
+    }
   });
 
   // POST /agent-runtime/sandbox — update sandbox mode at runtime

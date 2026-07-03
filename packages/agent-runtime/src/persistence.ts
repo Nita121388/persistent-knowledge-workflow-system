@@ -1,21 +1,29 @@
 import type { CaseId } from '@pkws/shared';
 import type { SessionPersistence, Message } from './types.js';
+import { DEFAULTS } from './types.js';
+
+/**
+ * Keep only the most recent N messages for persistence.
+ */
+function trimRecent(messages: Message[], keepCount: number = DEFAULTS.contextKeepRecentCount): Message[] {
+  return messages.length > keepCount ? messages.slice(-keepCount) : messages;
+}
 
 /**
  * Create a SessionPersistence backed by the @pkws/storage agent_sessions table.
+ *
+ * Storage strategy:
+ * - Stores only recent N messages (not full history) in recentMessagesJson
+ * - Stores AI-generated semantic summary in compressedSummary
+ * - Old messagesJson is kept for backward compatibility (not written anymore)
  */
 export function createPersistence(db: any, schema: any): SessionPersistence {
   return {
     async save(caseId: CaseId, data) {
-      // Integrity check: validate messages are well-formed
-      if (!Array.isArray(data.messages)) {
-        console.warn(`[Persistence] Integrity warning for ${caseId}: messages is not an array, skipping save`);
+      // Integrity check on recent messages
+      if (data.recentMessages && !Array.isArray(data.recentMessages)) {
+        console.warn(`[Persistence] Integrity warning for ${caseId}: recentMessages is not an array, skipping save`);
         return;
-      }
-      for (const msg of data.messages) {
-        if (!msg.role || !msg.content) {
-          console.warn(`[Persistence] Integrity warning for ${caseId}: message missing role or content`);
-        }
       }
       if (data.turnCount < 0) {
         console.warn(`[Persistence] Integrity warning for ${caseId}: negative turnCount ${data.turnCount}, clamping to 0`);
@@ -27,11 +35,12 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
       }
 
       const now = new Date().toISOString();
+      const recentJson = data.recentMessages ? JSON.stringify(data.recentMessages) : null;
       const row = db.select().from(schema.agentSessions).where(schema.agentSessions.caseId.eq(caseId)).get();
 
       if (row) {
         db.update(schema.agentSessions).set({
-          messagesJson: JSON.stringify(data.messages),
+          recentMessagesJson: recentJson,
           compressedSummary: data.compressedSummary,
           turnCount: data.turnCount,
           totalTokens: data.totalTokens,
@@ -42,7 +51,7 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
       } else {
         db.insert(schema.agentSessions).values({
           caseId,
-          messagesJson: JSON.stringify(data.messages),
+          recentMessagesJson: recentJson,
           compressedSummary: data.compressedSummary,
           turnCount: data.turnCount,
           totalTokens: data.totalTokens,
@@ -57,21 +66,28 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
       const row = db.select().from(schema.agentSessions).where(schema.agentSessions.caseId.eq(caseId)).get();
       if (!row) return null;
 
-      // Integrity check on load
-      let messages: Message[];
-      try {
-        messages = JSON.parse(row.messagesJson);
-        if (!Array.isArray(messages)) {
-          console.warn(`[Persistence] Integrity check failed for ${caseId}: messagesJson is not an array, returning null`);
+      // Try new recentMessagesJson first, fallback to old messagesJson
+      let messages: Message[] = [];
+      if (row.recentMessagesJson) {
+        try {
+          messages = JSON.parse(row.recentMessagesJson);
+          if (!Array.isArray(messages)) {
+            console.warn(`[Persistence] Integrity check failed for ${caseId}: recentMessagesJson is not an array, returning null`);
+            return null;
+          }
+        } catch (err: any) {
+          console.warn(`[Persistence] Integrity check failed for ${caseId}: cannot parse recentMessagesJson — ${err.message}`);
           return null;
         }
-      } catch (err: any) {
-        console.warn(`[Persistence] Integrity check failed for ${caseId}: cannot parse messagesJson — ${err.message}`);
-        return null;
-      }
-
-      if (row.turnCount < 0 || row.totalTokens < 0) {
-        console.warn(`[Persistence] Integrity check fixed negative values for ${caseId}`);
+      } else if (row.messagesJson) {
+        // Backward compatibility: read old full messagesJson
+        try {
+          const fullMessages: Message[] = JSON.parse(row.messagesJson);
+          messages = trimRecent(fullMessages);
+          console.log(`[Persistence] Loaded ${fullMessages.length} messages from legacy messagesJson for ${caseId}, trimmed to ${messages.length}`);
+        } catch (err: any) {
+          console.warn(`[Persistence] Legacy messagesJson parse failed for ${caseId}: ${err.message}`);
+        }
       }
 
       return {
