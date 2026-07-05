@@ -139,7 +139,7 @@ Agent Runtime（常驻进程，不是每次新建）
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                    SQLite（持久化）                        │   │
 │  │                                                           │   │
-│  │  cases / timeline_events / proposals / patch_manifests    │   │
+│  │  cases / timeline_events / proposals / ai_runs             │   │
 │  │  agent_sessions（CaseSession 的快照，用于 eviction 恢复）  │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘

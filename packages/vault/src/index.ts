@@ -3,7 +3,7 @@ import path from 'node:path';
 import matter from 'gray-matter';
 import { createHash } from 'node:crypto';
 import type { PatchOperation, PatchManifest, ApplyManifest } from '@pkws/shared';
-import { genApplyManifestId } from '@pkws/shared/utils.js';
+import { genApplyManifestId, genPatchManifestId } from '@pkws/shared/utils.js';
 
 export interface FileInfo {
   path: string;
@@ -225,6 +225,56 @@ export async function executePatch(
     }))),
     appliedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * Apply a list of `PatchOperation`s directly to the vault, with the same
+ * safety guarantees `executePatch` provides (path validation, hash check,
+ * backups, rollback manifest) but without requiring a `patch_manifests` DB
+ * row.
+ *
+ * `caseId` is threaded through so the produced `ApplyManifest` (and the
+ * on-disk backup manifest under `backupsPath/apply_<id>/manifest.json`)
+ * can be traced back to the case that triggered the write.
+ *
+ * Used by the agent-runtime scheduler (line 5 / task #16) when a CLI
+ * agent turn emits `modify_vault` operations after the user invoked a
+ * `modify_vault` next-step action.
+ *
+ * Returns the `ApplyManifest` so the caller can record it / reference
+ * its `id` in a timeline event.
+ */
+export async function applyOperations(
+  operations: PatchOperation[],
+  caseId: string,
+  config: VaultSafetyConfig,
+): Promise<ApplyManifest> {
+  // Compute base hashes from disk for update/move ops so executePatch's
+  // hash-validation phase passes (it asserts currentHash === baseHashes[path]).
+  const baseHashes: Record<string, string> = {};
+  for (const op of operations) {
+    if (op.type === 'update_file') {
+      baseHashes[op.path] = await computeHash(op.path);
+    } else if (op.type === 'move_file') {
+      baseHashes[op.fromPath] = await computeHash(op.fromPath);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const patchId = genPatchManifestId();
+  const manifest: PatchManifest = {
+    id: patchId,
+    caseId: caseId as any /* CaseId brand */,
+    patchIntentId: `pi_inline_${patchId}` as any /* required by type but
+      unused by executePatch; the patch_intents table is retired (line 1) */,
+    status: 'approved' /* skip the old preview step — user already approved */,
+    operationsJson: JSON.stringify(operations),
+    baseFileHashesJson: JSON.stringify(baseHashes),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return executePatch(manifest, config);
 }
 
 /**

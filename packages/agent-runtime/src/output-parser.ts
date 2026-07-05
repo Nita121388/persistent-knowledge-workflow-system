@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ProposalOutputSchema } from '@pkws/shared/utils.js';
 
 /**
  * Zod schemas for parsing structured output from CLI agents.
@@ -6,24 +7,18 @@ import { z } from 'zod';
  * CLI agents (Codex / Claude Code) write their output as JSON files
  * in the workDir/output/ directory. The scheduler parses these and
  * integrates them into the PKWS data model.
+ *
+ * Note: CLI agent proposal output must conform to the same
+ * ProposalOutputSchema as the direct-LLM path so both AI paths stay
+ * in lockstep. Re-export it here as CliProposalSchema for naming
+ * continuity with downstream callers; CLI path is forbidden from
+ * redefining this schema independently.
  */
 
 // ---- Proposal JSON ----
 // Written by CLI agent to output/proposal.json
-
-export const CliProposalSchema = z.object({
-  title: z.string(),
-  summary: z.string(),
-  valueJudgement: z.enum(['high', 'medium', 'low', 'drop']),
-  suggestedActions: z.array(z.enum([
-    'mark_done', 'drop', 'move', 'append_summary',
-    'update_frontmatter', 'generate_formal_note', 'merge_later', 'need_more_research',
-  ])),
-  suggestedTargetPath: z.string().optional(),
-  reasoningSummary: z.string(),
-  risks: z.array(z.string()).optional(),
-  requiresPatch: z.boolean().default(false),
-});
+// Schema is shared with the direct-LLM path via @pkws/shared.
+export const CliProposalSchema = ProposalOutputSchema;
 
 export type CliProposal = z.infer<typeof CliProposalSchema>;
 

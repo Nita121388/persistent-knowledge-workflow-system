@@ -3,7 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost } from '../lib/api.js';
 import { cn, getStatusColor, timeAgo } from '../lib/utils.js';
-import type { CaseDetail, PatchPreview, Proposal, PatchIntent } from '@pkws/shared';
+import type { CaseDetail, Proposal } from '@pkws/shared';
+import { AiRunCard } from '../components/AiRunCard.js';
 import { ArrowLeft, Bot, MessageSquare, CheckCircle2, XCircle, Trash2, RotateCcw, FileOutput, FilePlus, FolderOpen, FileText, Move, ExternalLink, BookOpen, Loader2 } from 'lucide-react';
 
 /** Open a vault file in Obsidian using obsidian:// URI */
@@ -19,10 +20,6 @@ export function CaseDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [comment, setComment] = useState('');
-  const [showPatchForm, setShowPatchForm] = useState(false);
-  const [patchAction, setPatchAction] = useState('move');
-  const [patchTarget, setPatchTarget] = useState('');
-  const [patchInstruction, setPatchInstruction] = useState('');
 
   const { data, isLoading } = useQuery({
     queryKey: ['case', caseId],
@@ -63,32 +60,16 @@ export function CaseDetailPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
   });
 
-  const patchIntentMutation = useMutation({
-    mutationFn: (data: Record<string, unknown>) => apiPost(`/cases/${caseId}/patch-intents`, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['case', caseId] });
-      setShowPatchForm(false);
+  // Open this AI run's transcript jsonl in the user's default editor. Server
+  // routes the path to `start`/`open`/`xdg-open`. No data refresh needed —
+  // we just notify the user on failure (e.g. when a run used the API path
+  // and has no transcript file).
+  const openTranscriptMutation = useMutation({
+    mutationFn: (runId: string) => apiPost(`/cases/${caseId}/ai-runs/${runId}/open-transcript`),
+    onError: (e: any) => {
+      const msg = e?.message ?? '无法打开会话文件';
+      window.alert(msg);
     },
-  });
-
-  const approveApplyMutation = useMutation({
-    mutationFn: (patchId: string) => apiPost(`/cases/${caseId}/patches/${patchId}/approve-apply`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
-  });
-
-  const rejectPatchMutation = useMutation({
-    mutationFn: (patchId: string) => apiPost(`/cases/${caseId}/patches/${patchId}/reject`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
-  });
-
-  const rollbackMutation = useMutation({
-    mutationFn: () => apiPost(`/cases/${caseId}/rollback`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
-  });
-
-  const reopenMutation = useMutation({
-    mutationFn: () => apiPost(`/cases/${caseId}/reopen`, { reason: '' }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
   });
 
   if (isLoading) {
@@ -113,42 +94,18 @@ export function CaseDetailPage() {
 
   const c = caseDetail.case;
   const proposal = caseDetail.currentProposal;
-  const patch = caseDetail.currentPatch;
   const timeline = caseDetail.timeline || [];
-  const patchIntents = caseDetail.patchIntents || [];
 
-  const canModify = ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
+  // PatchPreview / Approved were patch-orchestration states (line 1). Under
+  // the unified ai_turn model only ReviewRequired / NeedDiscussion drive
+  // the modify + show-proposal UI. Patch-era legacy rows visible from the
+  // dashboard will still render their timeline and basic case info, but no
+  // longer expose the comment box / proposal inline view (they can still
+  // open /cases/:id/proposal explicitly if a proposal exists).
+  const canModify = ['ReviewRequired', 'NeedDiscussion'].includes(c.status);
   const isCaptured = c.status === 'Captured';
   const isAnalyzing = c.status === 'Analyzing';
-  const showProposal = proposal && ['ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved'].includes(c.status);
-  const showPatch = patch && patch.status === 'preview';
-
-  const handleBrowseDir = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.setAttribute('webkitdirectory', '');
-    input.setAttribute('directory', '');
-    input.style.display = 'none';
-
-    input.addEventListener('change', (e) => {
-      const files = (e.target as HTMLInputElement).files;
-      if (files && files.length > 0) {
-        const fullPath = files[0].webkitRelativePath;
-        const dirPath = fullPath.substring(0, fullPath.length - files[0].webkitRelativePath.length);
-        // Extract relative path from vault root if possible
-        const vaultPath = caseDetail?.anchor?.currentVaultPath || '';
-        if (vaultPath && dirPath.startsWith(vaultPath)) {
-          setPatchTarget(dirPath.substring(vaultPath.length).replace(/^[\/\\]/, '') + '/');
-        } else {
-          setPatchTarget(dirPath.replace(/\/$/, '') + '/');
-        }
-      }
-    });
-
-    document.body.appendChild(input);
-    input.click();
-    setTimeout(() => document.body.removeChild(input), 1000);
-  };
+  const showProposal = proposal && ['ReviewRequired', 'NeedDiscussion'].includes(c.status);
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
@@ -216,25 +173,20 @@ export function CaseDetailPage() {
           </button>
           <button
             onClick={() => regenerateMutation.mutate()}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 border border-blue-200"
+            disabled={regenerateMutation.isPending}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition-all',
+              regenerateMutation.isPending
+                ? 'bg-blue-100 text-blue-400 border-blue-200 cursor-not-allowed'
+                : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border-blue-200'
+            )}
           >
-            <RotateCcw className="w-4 h-4" /> Regenerate
+            {regenerateMutation.isPending ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> Regenerating...</>
+            ) : (
+              <><RotateCcw className="w-4 h-4" /> Regenerate</>
+            )}
           </button>
-          <button
-            onClick={() => setShowPatchForm(!showPatchForm)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 border border-purple-200"
-            title="Generate Patch"
-          >
-            <FilePlus className="w-4 h-4" /> Generate Patch
-          </button>
-          {c.status === 'RolledBack' && (
-            <button
-              onClick={() => reopenMutation.mutate()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-amber-50 text-amber-700 rounded-lg"
-            >
-              <RotateCcw className="w-4 h-4" /> Reopen
-            </button>
-          )}
         </div>
       )}
 
@@ -278,72 +230,6 @@ export function CaseDetailPage() {
         </div>
       )}
 
-      {/* Patch form */}
-      {showPatchForm && (
-        <div className="bg-white rounded-lg border border-purple-200 p-4 mb-6">
-          <h3 className="font-medium text-sm mb-3">Generate Patch</h3>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-gray-500 block mb-1">Action</label>
-              <select
-                value={patchAction}
-                onChange={e => setPatchAction(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-              >
-                <option value="move">Move file</option>
-                <option value="update_frontmatter">Update frontmatter</option>
-                <option value="append_summary">Append summary</option>
-                <option value="generate_formal_note">Generate formal note</option>
-                <option value="create_index_link">Create index link</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-500 block mb-1">Target Path</label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={patchTarget}
-                  onChange={e => setPatchTarget(e.target.value)}
-                  placeholder="e.g., Resource/AI Tools/article.md"
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={handleBrowseDir}
-                  title="Browse vault folders"
-                  className="flex items-center gap-1.5 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
-                >
-                  <FolderOpen className="w-4 h-4" />
-                  <span className="hidden sm:inline">Browse</span>
-                </button>
-              </div>
-              <p className="text-xs text-gray-400 mt-1">Relative to vault root, or leave blank for AI to decide</p>
-            </div>
-            <div>
-              <label className="text-xs text-gray-500 block mb-1">Instructions (optional)</label>
-              <textarea
-                value={patchInstruction}
-                onChange={e => setPatchInstruction(e.target.value)}
-                rows={2}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                placeholder="Any specific instructions for generating this patch"
-              />
-            </div>
-            <button
-              onClick={() => patchIntentMutation.mutate({
-                action: patchAction,
-                targetPath: patchTarget || undefined,
-                instruction: patchInstruction || undefined,
-              })}
-              disabled={patchIntentMutation.isPending}
-              className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
-            >
-              {patchIntentMutation.isPending ? 'Generating...' : 'Generate Patch'}
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Proposal section */}
       {showProposal && proposal && (
         <div className="bg-white rounded-lg border border-blue-100 p-5 mb-6">
@@ -358,6 +244,26 @@ export function CaseDetailPage() {
               <ExternalLink className="w-3 h-3" /> Full Review
             </button>
           </div>
+
+          {/* AI Input Context - what we sent to AI */}
+          <details className="mb-4">
+            <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+              View AI input context
+            </summary>
+            <div className="mt-2 p-3 bg-gray-50 rounded-lg text-xs font-mono text-gray-600 max-h-96 overflow-y-auto whitespace-pre-wrap">
+              {caseDetail.artifact?.frontmatterJson && `## Note Metadata (frontmatter)
+${caseDetail.artifact.frontmatterJson}
+
+`}
+              {caseDetail.instructionSummary && `## User Feedback from Previous Analysis
+${caseDetail.instructionSummary.summary}
+
+`}
+              {proposal.rawJson && `## Proposal Output (raw)
+${proposal.rawJson.slice(0, 1000)}${(proposal.rawJson.length > 1000) ? '\n... (truncated)' : ''}
+`}
+            </div>
+          </details>
 
           <div className="space-y-3">
             <div>
@@ -384,22 +290,15 @@ export function CaseDetailPage() {
             </div>
 
             <div>
-              <span className="text-xs text-gray-500 block mb-1">Suggested Actions</span>
+              <span className="text-xs text-gray-500 block mb-1">Proposed Next Steps</span>
               <div className="flex flex-wrap gap-1.5">
-                {proposal.suggestedActions.map((a: string) => (
-                  <span key={a} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
-                    {a}
+                {proposal.proposedNextActions.map(a => (
+                  <span key={a.id} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                    {a.label}
                   </span>
                 ))}
               </div>
             </div>
-
-            {proposal.suggestedTargetPath && (
-              <div>
-                <span className="text-xs text-gray-500 block mb-0.5">Suggested Path</span>
-                <p className="text-sm font-mono text-gray-600">{proposal.suggestedTargetPath}</p>
-              </div>
-            )}
 
             <div>
               <span className="text-xs text-gray-500 block mb-0.5">Reasoning</span>
@@ -416,79 +315,6 @@ export function CaseDetailPage() {
                 </ul>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Patch preview */}
-      {showPatch && patch && (
-        <div className="bg-white rounded-lg border border-amber-200 p-5 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <FileOutput className="w-5 h-5 text-amber-600" />
-              <h2 className="font-semibold">Patch Preview</h2>
-              <button
-                onClick={() => navigate(`/cases/${caseId}/patch`)}
-                className="ml-2 text-xs text-amber-600 hover:text-amber-800 hover:underline flex items-center gap-1"
-              >
-                <ExternalLink className="w-3 h-3" /> Full Details
-              </button>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => approveApplyMutation.mutate(patch.id)}
-                className="flex items-center gap-1 px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
-              >
-                <CheckCircle2 className="w-4 h-4" /> Approve & Apply
-              </button>
-              <button
-                onClick={() => rejectPatchMutation.mutate(patch.id)}
-                className="flex items-center gap-1 px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200"
-              >
-                <XCircle className="w-4 h-4" /> Reject
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {(patch as any).operations?.map((op: any, i: number) => (
-              <div key={i} className="bg-gray-50 rounded p-3 text-sm">
-                <span className="font-medium text-gray-700">
-                  {op.type === 'create_file' && <><FileText className="w-4 h-4 inline mr-1 text-green-600" /> New</>}
-                  {op.type === 'update_file' && <><FileOutput className="w-4 h-4 inline mr-1 text-blue-600" /> Update</>}
-                  {op.type === 'move_file' && <><Move className="w-4 h-4 inline mr-1 text-purple-600" /> Move</>}
-                </span>
-                <div className="mt-1 font-mono text-xs text-gray-500">
-                  {op.type === 'move_file' ? (
-                    <><span className="line-through">{op.fromPath}</span> → <span>{op.toPath}</span></>
-                  ) : (
-                    op.path
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Rollback button for Done or Error cases */}
-      {['Done', 'Error'].includes(c.status) && (
-        <div className="bg-white rounded-lg border border-red-100 p-4 mb-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-sm">Rollback</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Revert the last apply for this case</p>
-            </div>
-            <button
-              onClick={() => {
-                if (confirm('Are you sure you want to rollback?')) {
-                  rollbackMutation.mutate();
-                }
-              }}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-lg hover:bg-red-100"
-            >
-              <RotateCcw className="w-4 h-4" /> Rollback
-            </button>
           </div>
         </div>
       )}
@@ -520,6 +346,34 @@ export function CaseDetailPage() {
             >
               {commentMutation.isPending ? 'Sending...' : 'Send'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* AI Runs — per-node transparency (line 4 / task #15).
+          Each ai_runs row is one AI invocation. The case-level proposal
+          summary above stays for the at-a-glance view; this list exposes
+          every node's material fed + output, newest first (the API already
+          returns aiRuns ordered by createdAt desc). */}
+      {(caseDetail.aiRuns?.length ?? 0) > 0 && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium flex items-center gap-1.5">
+              <Bot className="w-4 h-4 text-gray-500" />
+              AI Runs
+              <span className="text-xs text-gray-400 font-normal ml-1">
+                ({caseDetail.aiRuns.length})
+              </span>
+            </h3>
+          </div>
+          <div className="space-y-3">
+            {caseDetail.aiRuns.map((run) => (
+              <AiRunCard
+                key={run.id}
+                run={run}
+                onOpenTranscript={(r) => openTranscriptMutation.mutate(r.id)}
+              />
+            ))}
           </div>
         </div>
       )}

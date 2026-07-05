@@ -207,7 +207,6 @@ interface CaseRecord {
   status: CaseStatus;
   source: 'clipper' | 'manual' | 'obsidian_shortcut' | 'system';
   currentProposalId?: string;
-  currentPatchId?: string;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
@@ -218,22 +217,19 @@ type CaseStatus =
   | 'Analyzing'
   | 'ReviewRequired'
   | 'NeedDiscussion'
-  | 'PatchPreview'
-  | 'Approved'
-  | 'Applying'
   | 'Done'
   | 'Dropped'
   | 'Rejected'
-  | 'Error'
-  | 'RolledBack';
+  | 'Error';
 ```
 
 状态原则：
 
 - `ReviewRequired` 表示等待用户看 Proposal。
-- `PatchPreview` 表示已经生成 Patch，等待审批。
+- `NeedDiscussion` 表示用户对 Proposal 给了反馈或选择了某个 `proposedNextAction`，AI 正在跑下一轮。
 - `Done` 不一定意味着文件被修改，也可能只是用户确认原始笔记无需处理。
 - `Dropped` 表示用户放弃处理，但 Anchor 仍保留。
+- 注：`PatchPreview` / `Approved` / `Applying` / `RolledBack` 是已退役的旧补丁编排状态（line 1）。AI 现在通过 `invoke-next` 接收用户批准的 `modify_vault` 动作后直接写真 vault，并在 timeline 留下 `vault_modified` 事件；回滚交给 Obsidian 原生版本历史。
 
 ## 9. Timeline Event
 
@@ -260,13 +256,7 @@ type TimelineEventType =
   | 'user_commented'
   | 'user_marked_done'
   | 'user_dropped'
-  | 'patch_intent_created'
-  | 'patch_generated'
-  | 'patch_approved'
-  | 'apply_started'
-  | 'apply_completed'
-  | 'rollback_requested'
-  | 'rollback_completed'
+  | 'vault_modified'
   | 'error_occurred';
 ```
 
@@ -313,116 +303,81 @@ type ProposalAction =
 - Proposal 不直接修改 Vault。
 - Proposal 不等于整理后 Markdown。
 
-## 11. Patch Intent
+## 11. （已退役）Patch Intent / Patch Manifest / Apply Manifest
 
-Patch Intent 表示用户要求系统生成某类 Patch。
+> **`patch_intents` / `patch_manifests` / `apply_manifests` 三张表整体退役（line 1）。** 历史上的设计是：用户在 Proposal 上点某个静态动作 → 后端创建 `patch_intent` → 生成 `patch_manifest`（含 operations / preview）→ 用户审批 → 创建 `apply_manifest` → 写 vault → `rollback` 用 apply_manifest 反演。
+>
+> 现在的流程是「放权给 AI」：
+>
+> - AI 直接在 Proposal 里写 `proposedNextActions[]`，前端把这些动作渲染成动态按钮。
+> - 用户点某个动作 → `POST /cases/:caseId/invoke-next`，把它委托的 `intent` / `sideEffect` / `payload` 回灌给下一轮 AI。
+> - 当 `sideEffect === 'modify_vault'` 时，下一轮 AI 通过 Agent Runtime 直接把 `patch-operations.json` 应用到真 vault，并在 `timeline_events` 留一条 `vault_modified` 事件，CaseDetail 上的 AiRunCard 透明展示这一轮的 rulesSnapshot / inputContext / outputSummary。
+> - 回滚交给 Obsidian 原生版本历史 / 文件备份；系统不再保留 `apply_manifests`。
+>
+> `PatchOperation` 类型本身仍在使用（`@pkws/vault` 的 `applyOperations` 消费它），白名单保持不变：
+>
+> ```ts
+> type PatchOperation =
+>   | CreateFileOperation
+>   | UpdateFileOperation
+>   | MoveFileOperation;
+>
+> interface CreateFileOperation {
+>   type: 'create_file';
+>   path: string;
+>   content: string;
+>   ifExists: 'fail';
+> }
+>
+> interface UpdateFileOperation {
+>   type: 'update_file';
+>   path: string;
+>   beforeHash: string;
+>   newContent: string;
+> }
+>
+> interface MoveFileOperation {
+>   type: 'move_file';
+>   fromPath: string;
+>   toPath: string;
+>   beforeHash: string;
+>   ifTargetExists: 'fail';
+> }
+> ```
+>
+> 约束：
+>
+> - 不支持 delete。
+> - 不支持跨 Vault。
+> - 执行前必须重新校验 hash。
+
+## 12. AI Run
+
+`ai_runs` 表是 line 2 引入的"每轮 AI 节点透明化"主载体。每次 AI 跑一轮（生成 Proposal / 跑 invoke-next 委派 / regenerate）都写一行，前端 CaseDetail 的 `AiRunCard` 据此把每轮投喂给 AI 的内容、AI 的输出摘要、以及规则快照都展开来。
 
 ```ts
-interface PatchIntent {
+interface AiRun {
   id: string;
   caseId: string;
-  proposalId?: string;
-  action: PatchIntentAction;
-  instruction?: string;
-  targetPath?: string;
-  status: 'pending' | 'generating' | 'generated' | 'cancelled' | 'error';
+  trigger: 'proposal' | 'invoke_next' | 'regenerate';
+  rulesSnapshotJson: string;        // 本轮重读 DB Rules 后的快照（line 2 / Agent Runtime #12）
+  inputContextJson: string;         // 投喂给 AI 的 case 摘要 / artifact 内容（按字数截取）
+  outputKind: 'proposal' | 'vault_modified' | 'no_op';
+  outputSummary: string;            // AI 自己给的简短总结（不要求结构化）
+  outputRefId?: string;             // 关联的 proposalId / timelineEventId
+  startedAt: string;
+  finishedAt?: string;
   createdAt: string;
-  updatedAt: string;
-}
-
-type PatchIntentAction =
-  | 'move'
-  | 'update_frontmatter'
-  | 'append_summary'
-  | 'generate_formal_note'
-  | 'create_index_link';
-```
-
-说明：
-
-- Intent 是用户决策，不是 AI 自动行为。
-- 同一个 Proposal 可以产生多个 Intent。
-
-## 12. Patch Manifest
-
-Patch Manifest 是可执行变更集合。
-
-```ts
-interface PatchManifest {
-  id: string;
-  caseId: string;
-  patchIntentId: string;
-  status: 'draft' | 'preview' | 'approved' | 'applied' | 'rejected' | 'error';
-  operationsJson: string;
-  baseFileHashesJson: string;
-  previewJson?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-```
-
-MVP operation 白名单：
-
-```ts
-type PatchOperation =
-  | CreateFileOperation
-  | UpdateFileOperation
-  | MoveFileOperation;
-
-interface CreateFileOperation {
-  type: 'create_file';
-  path: string;
-  content: string;
-  ifExists: 'fail';
-}
-
-interface UpdateFileOperation {
-  type: 'update_file';
-  path: string;
-  beforeHash: string;
-  newContent: string;
-}
-
-interface MoveFileOperation {
-  type: 'move_file';
-  fromPath: string;
-  toPath: string;
-  beforeHash: string;
-  ifTargetExists: 'fail';
-}
-```
-
-约束：
-
-- 不支持 delete。
-- 不支持跨 Vault。
-- 不支持未审批 Apply。
-- 执行前必须重新校验 hash。
-
-## 13. Apply Manifest
-
-Apply Manifest 记录一次真实写入 Vault 的结果。
-
-```ts
-interface ApplyManifest {
-  id: string;
-  caseId: string;
-  patchManifestId: string;
-  status: 'applied' | 'rolled_back' | 'rollback_blocked';
-  appliedOperationsJson: string;
-  backupRefsJson: string;
-  appliedAt: string;
-  rolledBackAt?: string;
 }
 ```
 
 说明：
 
-- Apply Manifest 是 Rollback 的依据。
-- 只记录系统造成的修改。
-- 用户手动修改后，Rollback 必须先检测冲突。
+- `rulesSnapshotJson` 是 Agent Runtime 每轮开始时从 `workspace_rules` 表重新读取的快照（用户偏好可以热更新，AI 不会读到过期的 Rules）。
+- AI 不再返回 diff / 不再写 `patch_manifests`；`outputKind: 'vault_modified'` 时 `outputRefId` 指向 `timeline_events` 的 `vault_modified` 事件。
+- 同一个 Case 的多轮 AI 节点全部保留，`AiRunCard` 按 `startedAt` 倒序展示。
 
-## 14. Case Instruction Summary
+## 13. Case Instruction Summary
 
 Case Instruction Summary 保存当前 Case 的有效用户指示摘要。
 
@@ -444,7 +399,7 @@ MVP 原则：
 - 只影响当前 Case。
 - 优先级高于 Workspace Rules。
 
-## 15. Workspace Rule
+## 14. Workspace Rule
 
 Workspace Rule 是用户手动维护的全局偏好。
 
@@ -462,7 +417,7 @@ interface WorkspaceRule {
 
 MVP 不做自动学习写入。
 
-## 16. Job
+## 15. Job
 
 Job 保存后台任务状态。
 
@@ -484,11 +439,10 @@ interface Job {
 type JobType =
   | 'scan_inbox'
   | 'write_pkws_id'
-  | 'generate_proposal'
-  | 'generate_patch'
-  | 'apply_patch'
-  | 'rollback_apply';
+  | 'generate_proposal';
 ```
+
+> 注：`generate_patch` / `apply_patch` / `rollback_apply` 是已退役的旧补丁编排 Job 类型。Vault 写入现在由 Agent Runtime 在用户通过 `invoke-next` 批准 `modify_vault` 动作后直接做，不再入 Job 队列；回滚交给 Obsidian 原生版本历史。
 
 要求：
 
@@ -496,7 +450,7 @@ type JobType =
 - 失败原因必须在 UI 可见。
 - 同一文件扫描要具备幂等性。
 
-## 17. MVP 最小表清单
+## 16. MVP 最小表清单
 
 ```text
 settings
@@ -505,15 +459,17 @@ artifacts
 cases
 timeline_events
 proposals
-patch_intents
-patch_manifests
-apply_manifests
 case_instruction_summaries
 workspace_rules
 jobs
+agent_sessions
+log_entries
+ai_runs
 ```
 
-## 18. 待后续扩展
+> 注：`patch_intents` / `patch_manifests` / `apply_manifests` 已在 line 1 退役。AI 直接写真 vault，回滚交给 Obsidian 原生版本历史；vault 写入会在 `timeline_events` 留下 `vault_modified` 事件，对应的"每轮 AI 节点透明化"信息存于 `ai_runs` 表。
+
+## 17. 待后续扩展
 
 MVP 暂不设计或只预留：
 

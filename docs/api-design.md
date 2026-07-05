@@ -13,7 +13,7 @@ MVP API 设计目标：
 
 - 支撑本地 Web Console 完成主要工作流。
 - 所有长任务通过 Job 异步执行。
-- 明确区分 Proposal、Patch Intent、Patch Manifest、Apply。
+- 明确区分 Proposal（AI 建议） ↔ invoke-next（用户批准下一步动作） ↔ AI 直接写真 vault 三个阶段。
 - 禁止前端直接操作 Vault 文件系统。
 - 为未来轻量 Obsidian 插件预留批注和 Case 查询接口。
 
@@ -38,8 +38,7 @@ API Service 只负责：
 API Service 不负责：
 
 - 长时间 AI 调用。
-- 大文件 Patch Apply。
-- Rollback 具体执行。
+- 直接写真 vault（由 Agent Runtime 在用户批准 `modify_vault` 动作后做，回滚交给 Obsidian 原生版本历史）。
 - 直接让前端写 Vault。
 
 ## 3. 通用约定
@@ -230,12 +229,14 @@ autoAnalyze
 查询参数：
 
 ```text
-status?: Captured | Analyzing | ReviewRequired | PatchPreview | Applying | Done | Dropped | Error | RolledBack
+status?: Captured | Analyzing | ReviewRequired | NeedDiscussion | Done | Dropped | Error
 queue?: inbox | review | active | closed
 q?: string
 limit?: number
 offset?: number
 ```
+
+> 注：`PatchPreview` / `Approved` / `Applying` / `RolledBack` 是已退役的旧补丁编排状态。Case 现在通过 `ReviewRequired`/`NeedDiscussion` 在 Proposal ↔ AI 之间循环，AI 通过 `invoke-next` 拿到用户批准的 `modify_vault` 动作后直接写真 vault。
 
 响应数据项：
 
@@ -262,7 +263,6 @@ case
 anchor
 artifact
 currentProposal
-currentPatch
 instructionSummary
 timeline
 jobs
@@ -339,7 +339,7 @@ jobs
 行为：
 
 - Case 回到 `ReviewRequired` 或 `NeedDiscussion`。
-- 不自动生成 Patch。
+- 不直接改 vault；用户在 Proposal 上选某个 `proposedNextAction`，触发 `invoke-next` 后由下一轮 AI 改。
 
 ## 8. Proposal API
 
@@ -370,176 +370,24 @@ jobs
 
 - 创建 `generate_proposal` Job。
 - 成功后保存新的 Proposal。
-- 不生成 Patch。
+- AI 不直接写真 vault；只会通过 `proposedNextActions` 提议 `modify_vault` 类动作，由用户批准后下一轮 AI 才写。
 
 ### GET /cases/:caseId/proposals
 
 用途：查看 Case 的历史 Proposal。
 
-## 9. Patch Intent API
+## 9. （已退役）Patch / Apply / Rollback API
 
-### POST /cases/:caseId/patch-intents
+> **这一节整体退役（line 1）。** 历史上的 `POST /cases/:caseId/patch-intents`、`GET /cases/:caseId/patches/:patchId`、`POST /cases/:caseId/patches/:patchId/reject`、`POST /cases/:caseId/patches/:patchId/approve-apply`、`POST /cases/:caseId/rollback` 这些路由、以及背后的 `patch_intents` / `patch_manifests` / `apply_manifests` 表，已经全部删除。
+>
+> 现在的流程是「放权给 AI」：
+>
+> 1. AI 在每一轮把建议写进 Proposal 的 `proposedNextActions[]`，前端把这些动作渲染成动态按钮（不再生成 Patch Manifest / Preview / diff）。
+> 2. 用户点某个按钮 → `POST /cases/:caseId/invoke-next`（见第 8 节），后端把选中动作的 `intent` / `sideEffect` / `payload` 回灌给下一轮 AI。
+> 3. 当 `sideEffect === 'modify_vault'` 时，下一轮 AI 直接通过 Agent Runtime 把 `patch-operations.json` 应用到真 vault（`@pkws/vault` 的 `applyOperations`），并在 `timeline_events` 写一条 `vault_modified` 事件。
+> 4. 回滚交给 Obsidian 原生版本历史 / 文件备份；系统不再维护 `apply_manifests`、`rollback_apply` Job。
 
-用途：用户选择具体动作，请求系统生成 Patch。
-
-请求示例：Move：
-
-```json
-{
-  "action": "move",
-  "targetPath": "项目/2026/Q3/设计素材/AI 绘画工具汇总.md",
-  "instruction": "移动到设计素材目录，不改正文。"
-}
-```
-
-请求示例：Generate Formal Note：
-
-```json
-{
-  "action": "generate_formal_note",
-  "targetPath": "资源库/AI工具/AI 绘画工具汇总.md",
-  "instruction": "基于原文生成一篇正式整理笔记，保留来源链接。"
-}
-```
-
-响应：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "patchIntentId": "pi_20260627_001",
-    "jobId": "job_20260627_003"
-  }
-}
-```
-
-行为：
-
-- 创建 Patch Intent。
-- 创建 `generate_patch` Job。
-- 不直接 Apply。
-
-### GET /cases/:caseId/patch-intents
-
-用途：查看某个 Case 下的 Patch Intent 历史。
-
-## 10. Patch API
-
-### GET /cases/:caseId/patches/:patchId
-
-用途：获取 Patch Manifest 与 Preview。
-
-返回：
-
-```json
-{
-  "id": "patch_20260627_001",
-  "status": "preview",
-  "operations": [
-    {
-      "type": "move_file",
-      "fromPath": "Inbox/Web Clips/AI 绘画工具汇总.md",
-      "toPath": "项目/2026/Q3/设计素材/AI 绘画工具汇总.md"
-    }
-  ],
-  "preview": {
-    "affectedFiles": [
-      "Inbox/Web Clips/AI 绘画工具汇总.md",
-      "项目/2026/Q3/设计素材/AI 绘画工具汇总.md"
-    ]
-  }
-}
-```
-
-### POST /cases/:caseId/patches/:patchId/reject
-
-用途：拒绝当前 Patch。
-
-请求：
-
-```json
-{
-  "reason": "目标目录不对"
-}
-```
-
-行为：
-
-- Patch 状态变为 `rejected`。
-- Case 回到 `ReviewRequired` 或 `NeedDiscussion`。
-
-## 11. Apply API
-
-### POST /cases/:caseId/patches/:patchId/approve-apply
-
-用途：用户批准并执行 Patch。
-
-请求：
-
-```json
-{
-  "approvalNote": "确认移动到该目录"
-}
-```
-
-响应：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "jobId": "job_20260627_004"
-  }
-}
-```
-
-行为：
-
-- Patch 状态变为 `approved`。
-- 创建 `apply_patch` Job。
-- Worker 通过 Vault Safety Layer 执行。
-- Apply 前创建备份和 Apply Manifest。
-
-约束：
-
-- 不能 Apply 非当前 Case 的 Patch。
-- 不能 Apply 未处于 `preview` 状态的 Patch。
-- 不能跳过 hash 校验。
-
-## 12. Rollback API
-
-### POST /cases/:caseId/rollback
-
-用途：回滚该 Case 最近一次 Apply。
-
-请求：
-
-```json
-{
-  "applyManifestId": "apply_20260627_001",
-  "reason": "移动位置不合适"
-}
-```
-
-响应：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "jobId": "job_20260627_005"
-  }
-}
-```
-
-行为：
-
-- 创建 `rollback_apply` Job。
-- Rollback 前检查目标文件是否被用户手动修改。
-- 冲突时返回 `ROLLBACK_BLOCKED`，不强行覆盖。
-
-## 13. Workspace Rules API
+## 10. Workspace Rules API
 
 ### GET /workspace-rules
 
@@ -570,7 +418,7 @@ jobs
 
 MVP 可以先实现软删除或 `enabled=false`。
 
-## 14. Job API
+## 11. Job API
 
 ### GET /jobs/:jobId
 
@@ -581,7 +429,7 @@ MVP 可以先实现软删除或 `enabled=false`。
 ```json
 {
   "id": "job_20260627_004",
-  "type": "apply_patch",
+  "type": "generate_proposal",
   "status": "running",
   "retryCount": 0,
   "errorMessage": null,
@@ -595,7 +443,7 @@ MVP 可以先实现软删除或 `enabled=false`。
 
 MVP 可仅在 Settings / Diagnostics 页面使用。
 
-## 15. Anchor API
+## 12. Anchor API
 
 ### GET /anchors/:anchorId
 
@@ -630,7 +478,7 @@ latestTimelineEvents
 - 记录 Timeline Event。
 - 不自动移动文件。
 
-## 16. 未来 Obsidian 插件预留 API
+## 13. 未来 Obsidian 插件预留 API
 
 MVP 不实现插件，但预留接口形态：
 
@@ -648,7 +496,7 @@ POST /cases
 - 用户从 Obsidian 快捷键创建新 Case。
 - 用户选择把批注绑定到已有 Case 或创建新 Case。
 
-## 17. API 开发顺序
+## 14. API 开发顺序
 
 建议顺序：
 
@@ -661,17 +509,16 @@ POST /inbox/scan
 GET /jobs/:jobId
 GET /cases
 GET /cases/:caseId
-POST /cases/:caseId/proposals/regenerate
-POST /cases/:caseId/comment
+POST /cases/:caseId/invoke-next      # 选中某个 proposedNextAction，触发下一轮 AI
+POST /cases/:caseId/comment          # 用户反馈，触发 regenerate
 POST /cases/:caseId/mark-done
 POST /cases/:caseId/drop
-POST /cases/:caseId/patch-intents
-GET /cases/:caseId/patches/:patchId
-POST /cases/:caseId/patches/:patchId/approve-apply
-POST /cases/:caseId/rollback
+GET /workspace-rules
+POST /workspace-rules
+GET /anchors
 ```
 
-## 18. 不做的 API
+## 15. 不做的 API
 
 MVP 不提供：
 

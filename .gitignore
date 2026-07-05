@@ -6,3 +6,23 @@ dist/
 .DS_Store
 thumbs.db
 *.tsbuildinfo
+# local SQLite scratch files
+*.sqlite
+*.sqlite-journal
+
+# Playwright MCP / local test artifacts
+.playwright-mcp/
+apps/web/test-screenshots/
+apps/web/test-screenshots-round2/
+
+# throwaway e2e scripts (kept locally, not in repo)
+apps/web/e2e-test-*.cjs
+
+# accidental empty files from botched shell quoting
+No
+Settings
+nth
+a.file))
+
+# local debugging snapshots
+setup-wizard-snapshot.md

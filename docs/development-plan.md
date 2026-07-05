@@ -282,13 +282,13 @@ src/
 Captured
 Analyzing
 ReviewRequired
-PatchPreview
-Applying
+NeedDiscussion
 Done
 Dropped
 Error
-RolledBack
 ```
+
+> 注：`PatchPreview` / `Applying` / `RolledBack` 是已退役的旧补丁编排状态（line 1）。AI 通过 `invoke-next` 拿到用户批准的 `modify_vault` 动作后直接写真 vault，回滚交给 Obsidian 原生版本历史。
 
 完成标准：
 
@@ -330,85 +330,19 @@ requires_patch
 - 用户可以基于 Proposal 选择 Mark Done、Drop、Comment 或 Generate Patch。
 - AI 失败时 Case 进入 Error，并显示失败原因。
 
-## Milestone 5：按需 Patch Manifest 与 Preview
+## Milestone 5：（已退役，line 1）Patch Manifest / Approve & Apply / Rollback
 
-目标：只有当用户选择具体改动动作时，系统才生成可预览 Patch。
-
-触发场景：
-
-```text
-Move
-Add / Update Frontmatter
-Append Summary
-Generate Formal Note
-Create Index Link
-```
-
-任务：
-
-1. 定义 Patch Intent。
-2. 定义 Patch Manifest Schema。
-3. 支持 create_file / update_file / move_file。
-4. 对生成正式笔记场景，可在 Workspace Staging 中保存预览草稿。
-5. 展示文件影响清单。
-6. 展示最终 Markdown 或 frontmatter 预览。
-7. 使用 jsdiff / react-diff-view 展示差异。
-8. 禁止未审批 Patch Apply。
-
-完成标准：
-
-- 用户只有在请求修改 Vault 时才看到 Patch Preview。
-- 用户能清楚知道会新增、修改或移动哪些文件。
-- 原始 Clipper 笔记不会因为 Proposal 阶段被重写。
-
-## Milestone 6：Approve & Apply
-
-目标：审批后安全写入 Vault。
-
-任务：
-
-1. 实现 Approval Action。
-2. Apply 前校验 Patch。
-3. Apply 前检查目标文件状态。
-4. Apply 前备份受影响文件。
-5. 使用原子写入。
-6. 更新 Case 状态。
-7. 记录 Applied Event。
-8. Case 进入 Done 或回到 ReviewRequired。
-
-冲突策略：
-
-```text
-如果目标文件在 Patch 生成后被用户改动：
-  -> 阻止 Apply
-  -> Case 进入 Error / Blocked
-  -> 用户选择重新生成 Patch / 另存为新文件 / 放弃
-```
-
-完成标准：
-
-- 用户点击 Approve & Apply 后，Patch 安全写入 Vault。
-- 原始受影响文件已备份。
-- Dashboard 显示 Case Done 或明确后续待处理状态。
-
-## Milestone 7：基础 Rollback
-
-目标：支持撤销系统上一次 Apply。
-
-任务：
-
-1. 保存 Apply Manifest。
-2. 保存受影响文件备份。
-3. Rollback 前检测目标文件是否被用户修改。
-4. 支持撤销新增文件。
-5. 支持恢复被 update 的文件。
-6. 支持恢复 move 的文件。
-7. 记录 RolledBack Event。
-
-完成标准：
-
-- 用户能回滚系统造成的一次 Apply。
-- 如果目标文件已被用户改动，系统不强行覆盖。
+> 这一节描述的 Milestone 5（Patch Manifest & Preview）、Milestone 6（Approve & Apply）、Milestone 7（基础 Rollback）已被线 1 整体退役。原因：补丁机制过度设计——`patch_intents` / `patch_manifests` / `apply_manifests` 三张表、`generate_patch` / `apply_patch` / `rollback_apply` 三类 Job、Approval Action、jsdiff / react-diff-view 预览，对用户而言只能看到 diff 而看不到 AI 怎么想。
+>
+> 现在的做法（放权给 AI）：
+>
+> - AI 在每一轮把建议写进 Proposal 的 `proposedNextActions[]`（含 `intent` / `sideEffect` / `payload`），前端把这些动作渲染成动态按钮。
+> - 用户点某个按钮 → `POST /cases/:caseId/invoke-next`，把选中动作的 `intent` / `sideEffect` / `payload` 回灌给下一轮 AI。
+> - 当 `sideEffect === 'modify_vault'` 时，下一轮 AI 通过 Agent Runtime 直接把 `patch-operations.json` 应用到真 vault（`@pkws/vault` 的 `applyOperations`，仍只支持 create_file / update_file / move_file，执行前重新校验 hash），并在 `timeline_events` 写一条 `vault_modified` 事件。
+> - 每一轮 AI 的 rulesSnapshot / inputContext / outputSummary 都进 `ai_runs` 表，CaseDetail 的 `AiRunCard` 透明展示。
+> - 回滚交给 Obsidian 原生版本历史 / 文件备份；系统不再维护 `apply_manifests`、不再做 rollback Job。
+>
+> 等价的"真改 vault"路径在线 5 路径 A 实现（`packages/agent-runtime` 的 `applyVaultOps` → `packages/vault` 的 `applyOperations`）。
 
 ## Milestone 8：Case Memory 与 Workspace Rules
 
@@ -548,15 +482,12 @@ Settings
 Inbox
 Cases
 Proposals
-Patch Intents
-Patch Preview
-Approval / Apply
-Rollback
+invoke-next (proposedNextActions 动态按钮)
 Workspace Rules
 Jobs
 ```
 
-详细设计见 `docs/api-design.md`。
+> 注：`Patch Intents` / `Patch Preview` / `Approval / Apply` / `Rollback` 这些 API 已退役（line 1）。详细设计见 `docs/api-design.md`。
 
 ## 7. 开发顺序建议
 

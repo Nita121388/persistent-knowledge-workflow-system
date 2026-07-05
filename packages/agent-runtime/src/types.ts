@@ -59,6 +59,12 @@ export interface CliResult {
   outputFiles: Array<{ path: string; content: string }>;
   timedOut: boolean;
   durationMs: number;
+  /** Which CLI family was used: 'claude' | 'codex' | null (custom binary, no session recorded). */
+  agentId?: 'claude' | 'codex';
+  /** UUID we asked the CLI to use as --session-id. The session file on disk should match this id. */
+  sessionId?: string;
+  /** Absolute path of the transcript jsonl written by the CLI, if we found it. */
+  transcriptPath?: string;
 }
 
 // ---- Session snapshot (for persistence / debug) ----

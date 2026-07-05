@@ -12,6 +12,7 @@ import { broadcastWsEvent } from '../ws-broadcast.js';
  * GET  /api/agent-runtime/status           → current runtime status
  * GET  /api/agent-runtime/sessions         → full session list with message summaries
  * GET  /api/agent-runtime/available-agents → list of detected CLI agents
+ * POST /api/agent-runtime/select-cli       → pick default CLI from detected ones (hot-restart)
  * POST /api/agent-runtime/toggle           → enable/disable Agent Runtime at runtime
  * POST /api/agent-runtime/sandbox          → update sandbox mode at runtime
  * POST /api/agent-runtime/clear-sessions   → clear all sessions
@@ -90,6 +91,82 @@ export const agentRuntimeRoutes: FastifyPluginAsync = async (app) => {
       ok: true,
       data: detectAvailableAgents(),
     };
+  });
+
+  // POST /agent-runtime/select-cli — pick the default CLI agent.
+  // body: { cliPath: string } — must match one of detectAvailableAgents()'s `.path`.
+  // Updates settings.agentCliPath and hot-restarts the runtime so the new CLI takes effect.
+  app.post<{ Body: { cliPath: string } }>('/agent-runtime/select-cli', async (request, reply) => {
+    const db = getDb();
+    const existing = await db.select().from(schema.settings).all();
+    if (existing.length === 0) {
+      return reply.status(400).send({ ok: false, error: { code: 'NO_SETTINGS', message: 'Settings not found. Complete setup first.' } });
+    }
+
+    const requested = request.body?.cliPath;
+    if (!requested) {
+      return reply.status(400).send({ ok: false, error: { code: 'INVALID_PATH', message: 'cliPath required' } });
+    }
+    // Validate against detected agents — only allow paths we found on the system.
+    const agents = detectAvailableAgents();
+    const match = agents.find(a => a.path !== null && a.path === requested);
+    if (!match || !match.path) {
+      return reply.status(400).send({
+        ok: false,
+        error: { code: 'NOT_DETECTED', message: `Selected CLI is not detected on this system: ${requested}` },
+      });
+    }
+
+    db.update(schema.settings)
+      .set({ agentCliPath: match.path, updatedAt: new Date().toISOString() })
+      .where(eq(schema.settings.id, existing[0].id))
+      .run();
+
+    // Cold-start path: runtime isn't running now, so just persist the choice.
+    if (!agentRuntime) {
+      return { ok: true, data: { agentCliPath: match.path, restarted: false, message: 'Default CLI saved. Will apply on next Agent Runtime start.' } };
+    }
+
+    // Hot-restart: stop current runtime, start a new one with the new CLI.
+    console.log(`[SelectCli] Restarting Agent Runtime with CLI: ${match.path}`);
+    try {
+      const rt = agentRuntime;
+      await rt.stop();
+      setAgentRuntime(null);
+
+      const settings = await loadSettings();
+      if (!settings) {
+        return reply.status(500).send({ ok: false, error: { code: 'NO_SETTINGS', message: 'Settings not found after restart' } });
+      }
+
+      const { createPersistence, startAgentRuntime } = await import('@pkws/agent-runtime');
+      const persistence = createPersistence(getDb(), schema);
+      const runtime = await startAgentRuntime({
+        db: getDb(),
+        workspacePath: settings.workspacePath,
+        vaultPath: settings.vaultPath,
+        cliPath: settings.agentCliPath || undefined,
+        maxActiveSessions: settings.maxActiveSessions,
+        sessionTimeoutMinutes: settings.sessionTimeoutMinutes,
+        contextCompressThreshold: settings.contextCompressThreshold,
+        contextKeepRecentCount: settings.contextKeepRecentCount,
+        maxTokensPerSession: settings.maxTokensPerSession,
+        sandboxMode: settings.sandboxMode,
+        persistence,
+      });
+      runtime.setWsBroadcast((event: WsEvent) => { broadcastWsEvent(event); });
+      setAgentRuntime(runtime);
+
+      const status = runtime.getStatus();
+      console.log('[SelectCli] Agent Runtime restarted with CLI:', status.cliPath);
+      return { ok: true, data: { agentCliPath: match.path, restarted: true, running: status.running } };
+    } catch (err: any) {
+      console.error('[SelectCli] Failed to restart Agent Runtime:', err);
+      return reply.status(500).send({
+        ok: false,
+        error: { code: 'RESTART_FAILED', message: `CLI saved, but restart failed: ${err.message}` },
+      });
+    }
   });
 
   // POST /agent-runtime/toggle — enable or disable Agent Runtime at runtime

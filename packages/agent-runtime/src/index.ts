@@ -24,7 +24,7 @@ export { buildContext, compressSession, estimateTokens } from './context-builder
 export { runCliAgent, verifyCli, getAgentWorkDir } from './cli-runner.js';
 export type { CliRunnerOptions } from './cli-runner.js';
 
-export { detectAvailableAgents, resolveCliPath, isAnyAgentAvailable } from './agent-detect.js';
+export { detectAvailableAgents, resolveCliPath, isAnyAgentAvailable, detectAgentIdFromPath } from './agent-detect.js';
 
 export { createPersistence } from './persistence.js';
 
@@ -34,7 +34,7 @@ export type { LogLevel, LogCategory, LogEntry } from './logger.js';
 export { parseCliOutput } from './output-parser.js';
 export type { CliProposal, CliPatch, CliPatchOperation, ParsedCliOutput } from './output-parser.js';
 
-export { writeProposal, writePatch, recordAiTurn } from './output-writer.js';
+export { writeProposal, applyVaultOps, recordAiTurn } from './output-writer.js';
 export type { OutputWriterOptions } from './output-writer.js';
 
 /**

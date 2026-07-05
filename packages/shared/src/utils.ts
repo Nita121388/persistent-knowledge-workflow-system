@@ -29,6 +29,10 @@ export function genProposalId(): `prop_${string}` {
   return `prop_${idDate()}_${randSuffix(4)}` as const;
 }
 
+export function genAiRunId(): `air_${string}` {
+  return `air_${idDate()}_${randSuffix(4)}` as const;
+}
+
 export function genPatchIntentId(): `pi_${string}` {
   return `pi_${idDate()}_${randSuffix(4)}` as const;
 }
@@ -84,19 +88,15 @@ export const CommentRequestSchema = z.object({
   updateInstructionSummary: z.boolean().optional(),
 });
 
-export const PatchIntentRequestSchema = z.object({
-  action: z.enum(['move', 'update_frontmatter', 'append_summary', 'generate_formal_note', 'create_index_link']),
-  instruction: z.string().optional(),
-  targetPath: z.string().optional(),
-});
-
-export const ApproveApplyRequestSchema = z.object({
-  approvalNote: z.string().optional(),
-});
-
-export const RollbackRequestSchema = z.object({
-  applyManifestId: z.string(),
-  reason: z.string().optional(),
+/**
+ * Body for POST /cases/:caseId/invoke-next — user picked one of the AI-proposed
+ * next-step buttons. `actionId` matches `ProposedNextAction.id` on the case's
+ * current proposal. Optional `feedback` lets the user add a free-text note
+ * alongside the picked action (e.g. clarifying concerns before AI executes).
+ */
+export const InvokeNextRequestSchema = z.object({
+  actionId: z.string().min(1),
+  feedback: z.string().optional(),
 });
 
 export const ReopenRequestSchema = z.object({
@@ -121,17 +121,24 @@ export const InstructionSummaryUpdateSchema = z.object({
   summary: z.string().min(1),
 });
 
+// ---- Proposed Next Action (AI-decided per-turn menu item) ----
+export const ProposedNextActionSchema = z.object({
+  id: z.string().describe('Stable id for this action; the user flow returns this id to invoke the action.'),
+  label: z.string().describe('Short button label, e.g. "Let me add tags directly" or "Mark as done".'),
+  description: z.string().describe('One or two sentences: what will happen if the user picks this. For modify_vault, describe the planned change in plain language.'),
+  intent: z.string().describe('Free-form category tag for UI grouping (e.g. "modify_vault", "quick_close", "ask_user", "clarify", "regenerate"). The UI renders unknown intents with a neutral style, so you may coin new intents when the existing ones do not fit.'),
+  sideEffect: z.string().describe('What happens if the user picks this: one of "modify_vault" (you will edit Vault after the user agrees your plan), "quick_close" (case closes, no Vault change), "ask_user" (you ask the user a clarifying question), "clarify" (you restate or refine your proposal), "regenerate" (you re-analyze from scratch). Coin a new value only if none of these fit.'),
+  payload: z.string().optional().describe('Opaque JSON string you can fill with anything you need carried back to you when the user picks this action. The system returns it to you verbatim on the next turn. Use it to stash planned edit details, target paths, or context.'),
+});
+
 // ---- Proposal AI Output Schema ----
+// Used by BOTH the direct-LLM path (generateObject) and the Agent Runtime CLI
+// path (proposal.json). Do not redefine this schema elsewhere.
 export const ProposalOutputSchema = z.object({
   title: z.string().describe('A clear title for the content'),
   summary: z.string().describe('A short summary of what this content is about'),
   valueJudgement: z.enum(['high', 'medium', 'low', 'drop']).describe('How valuable is this content'),
-  suggestedActions: z.array(z.enum([
-    'mark_done', 'drop', 'move', 'append_summary',
-    'update_frontmatter', 'generate_formal_note', 'merge_later', 'need_more_research',
-  ])).describe('What actions the system suggests'),
-  suggestedTargetPath: z.string().optional().describe('If moving, where should it go'),
+  proposedNextActions: z.array(ProposedNextActionSchema).describe('The next-step menu you propose for this case. Decide the contents yourself per-turn — do NOT pick from a fixed enum. You may include quick_close actions that suggest closing the case (e.g. "not worth processing, mark done"). Aim for 1-4 actions the user can pick from, or an empty array if no actionable next step exists yet.'),
   reasoningSummary: z.string().describe('Why you made this suggestion'),
   risks: z.array(z.string()).optional().describe('Potential risks or uncertainties'),
-  requiresPatch: z.boolean().describe('True if any action needs Vault modification'),
 });

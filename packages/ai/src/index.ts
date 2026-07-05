@@ -33,7 +33,17 @@ For each piece of content, analyze:
 5. Why do you recommend this?
 
 Workspace Rules are the user's long-term preferences. Follow them unless the Case Instructions say otherwise.
-Case Instructions are specific to this single case and override Workspace Rules if they conflict.`;
+Case Instructions are specific to this single case and override Workspace Rules if they conflict.
+
+PROPOSED NEXT ACTIONS:
+You decide yourself what next-step options to offer the user; do NOT pick from a fixed menu. Provide 1-4 options in proposedNextActions.
+Each option has:
+- label: short button text (e.g. "Let me add tags directly", "Not worth it, mark done", "Ask me which daily-note template to use").
+- description: 1-2 sentences on what happens if the user picks it. For modify_vault, describe the planned change in plain language (you will draft the actual change next turn after the user agrees).
+- intent: free-form category tag the UI uses for grouping (e.g. "modify_vault", "quick_close", "ask_user", "clarify", "regenerate"). Coin a new intent when the existing ones don't fit.
+- sideEffect: what happens if picked — "modify_vault" (you'll edit Vault after user agrees your plan), "quick_close" (case closes, no Vault change), "ask_user" (you ask a clarifying question), "clarify" (you restate/refine), "regenerate" (you re-analyze from scratch).
+- payload (optional): an opaque JSON string you can stash anything in; the system returns it verbatim on the next turn. Use it to remember planned edits, target paths, etc.
+You MAY include quick_close actions suggesting the case be closed (e.g. drop, not worth processing). The user still decides whether to click — you are only proposing options.`;
 
 function buildUserPrompt(input: ProposalInput): string {
   const parts: string[] = [];
@@ -44,11 +54,15 @@ function buildUserPrompt(input: ProposalInput): string {
   if (input.sourceUrl) {
     parts.push(`\n## Source URL\n${input.sourceUrl}`);
   }
-  if (input.frontmatterTags) {
-    parts.push(`\n## Existing Tags\n${input.frontmatterTags}`);
+  if (input.frontmatterContext) {
+    parts.push(`\n## Note Metadata (frontmatter)\n${input.frontmatterContext}
+
+The data above is the note's complete metadata. It may contain custom fields like "想法|描述", "description", "意图", or other user-written notes about what to do with this content. The user's Workspace Rules may reference specific fields — follow those instructions.`);
   }
   if (input.instructionSummary) {
-    parts.push(`\n## Case Instructions (override workspace rules)\n${input.instructionSummary}`);
+    parts.push(`\n## User Feedback from Previous Analysis\n${input.instructionSummary}
+
+NOTE: The above is **your previous analysis** plus feedback the user provided after reading it. This represents corrections, refinements, or instructions that override your earlier suggestions. Pay special attention to specific requests — the user is telling you what they want changed.`);
   }
   if (input.workspaceRules) {
     parts.push(`\n## Workspace Rules (user's long-term preferences)\n${input.workspaceRules}`);
@@ -134,11 +148,9 @@ export async function generateProposal(
     title: output.title,
     summary: output.summary,
     valueJudgement: output.valueJudgement,
-    suggestedActions: output.suggestedActions,
-    suggestedTargetPath: output.suggestedTargetPath,
+    proposedNextActions: output.proposedNextActions,
     reasoningSummary: output.reasoningSummary,
     risks: output.risks,
-    requiresPatch: output.requiresPatch,
     rawJson: JSON.stringify(output),
     createdAt: new Date().toISOString(),
   };

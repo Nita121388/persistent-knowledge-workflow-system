@@ -3,25 +3,33 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost } from '../lib/api.js';
 import { cn, timeAgo } from '../lib/utils.js';
-import type { CaseDetail, Proposal } from '@pkws/shared';
+import type { CaseDetail, Proposal, ProposedNextAction } from '@pkws/shared';
 import {
   ArrowLeft, Bot, CheckCircle2, XCircle, Trash2, RotateCcw,
-  FilePlus, MessageSquare, Lightbulb, Target, AlertTriangle,
-  Move, FileOutput, FileText, ListPlus, Sparkles, RefreshCw,
-  Loader2, ExternalLink
+  MessageSquare, Lightbulb, Target, AlertTriangle,
+  FileOutput, RefreshCw,
+  Loader2
 } from 'lucide-react';
 
-const ACTION_LABELS: Record<string, { label: string; icon: React.ElementType; description: string }> = {
-  mark_done: { label: 'Mark Done', icon: CheckCircle2, description: 'No vault changes needed' },
-  drop: { label: 'Drop', icon: XCircle, description: 'Discard this case' },
-  move: { label: 'Move', icon: Move, description: 'Move file to another location' },
-  append_summary: { label: 'Append Summary', icon: FileOutput, description: 'Add AI summary to the file' },
-  update_frontmatter: { label: 'Update Frontmatter', icon: FileText, description: 'Add/update metadata fields' },
-  generate_formal_note: { label: 'Formal Note', icon: Sparkles, description: 'Create a polished note from the content' },
-  create_index_link: { label: 'Create Index Link', icon: ListPlus, description: 'Add an entry to an index note' },
-  merge_later: { label: 'Merge Later', icon: FilePlus, description: 'Combine with related content later' },
-  need_more_research: { label: 'More Research', icon: Lightbulb, description: 'Need additional context before deciding' },
+/**
+ * Color/icon hint for a ProposedNextAction's sideEffect.
+ * `sideEffect` is a free-form string the AI itself picks; only the well-known
+ * values map to a styled bucket. Anything unknown falls back to the neutral
+ * gray "clarify" treatment, mirroring the backend's uid-neutral handling
+ * of unknown intents. This is the ONLY place in the FE that hardcodes the
+ * known vocabulary — everything else is rendered straight from AI output.
+ */
+const SIDE_EFFECT_STYLE: Record<string, { bucket: 'modify_vault' | 'quick_close' | 'clarify'; icon: React.ElementType; accent: string }> = {
+  modify_vault: { bucket: 'modify_vault', icon: FileOutput, accent: 'purple' },
+  quick_close:  { bucket: 'quick_close',  icon: CheckCircle2, accent: 'green' },
+  ask_user:     { bucket: 'clarify',     icon: MessageSquare, accent: 'gray' },
+  clarify:      { bucket: 'clarify',     icon: MessageSquare, accent: 'gray' },
+  regenerate:   { bucket: 'clarify',     icon: RefreshCw, accent: 'gray' },
 };
+
+function sideEffectStyle(sideEffect: string) {
+  return SIDE_EFFECT_STYLE[sideEffect] ?? { bucket: 'clarify' as const, icon: Lightbulb, accent: 'gray' };
+}
 
 function ValueBadge({ value }: { value: string }) {
   return (
@@ -82,9 +90,12 @@ export function ProposalReviewPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
   });
 
-  // Generate patch intent for a specific action
-  const patchIntentMutation = useMutation({
-    mutationFn: (action: string) => apiPost(`/cases/${caseId}/patch-intents`, { action }),
+  // Invoke one of the AI-proposed next-step actions (ProposedNextAction).
+  // The backend looks up the action by id on the case's current proposal and
+  // feeds it back to the next AI turn. Vault writing (modify_vault) is
+  // performed by the next turn, not here.
+  const invokeNextMutation = useMutation({
+    mutationFn: (actionId: string) => apiPost(`/cases/${caseId}/invoke-next`, { actionId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['case', caseId] });
       navigate(`/cases/${caseId}`);
@@ -113,12 +124,10 @@ export function ProposalReviewPage() {
     );
   }
 
-  // Determine which actions need a patch (vault modification)
-  const needsPatchActions = ['move', 'append_summary', 'update_frontmatter', 'generate_formal_note', 'create_index_link'];
-  const noPatchActions = ['mark_done', 'drop', 'merge_later', 'need_more_research'];
-
-  const suggestedPatchActions = (proposal?.suggestedActions || []).filter(a => needsPatchActions.includes(a));
-  const suggestedNoPatchActions = (proposal?.suggestedActions || []).filter(a => noPatchActions.includes(a));
+  // Proposed next-step actions rendered directly from the AI's proposal.
+  // Bucketing, label, description, and intent are all AI-decided — the FE only
+  // maps the well-known sideEffect values to a color/icon (see SIDE_EFFECT_STYLE).
+  const proposedActions: ProposedNextAction[] = proposal?.proposedNextActions ?? [];
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
@@ -179,85 +188,64 @@ export function ProposalReviewPage() {
               <p className="text-sm text-gray-700 leading-relaxed">{proposal.summary}</p>
             </div>
 
-            {/* Value & Path row */}
+            {/* Value */}
             <div className="flex flex-wrap gap-6">
               <div>
                 <span className="text-xs text-gray-400 block mb-1">Value</span>
                 <ValueBadge value={proposal.valueJudgement} />
               </div>
-              {proposal.suggestedTargetPath && (
-                <div className="min-w-0 flex-1">
-                  <span className="text-xs text-gray-400 block mb-1">Suggested Path</span>
-                  <code className="text-xs bg-gray-100 px-2 py-1 rounded font-mono text-gray-700 break-all">
-                    {proposal.suggestedTargetPath}
-                  </code>
-                </div>
-              )}
             </div>
 
-            {/* Suggested Actions (needs patch) */}
-            {suggestedPatchActions.length > 0 && (
+            {/* AI-proposed next-step actions */}
+            {proposedActions.length > 0 && (
               <div>
                 <div className="flex items-center gap-2 text-xs text-gray-400 uppercase tracking-wider mb-2">
-                  <FileOutput className="w-3 h-3" />
-                  Actions that modify Vault
+                  <Bot className="w-3 h-3" />
+                  Next steps (proposed by AI)
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {suggestedPatchActions.map(action => {
-                    const meta = ACTION_LABELS[action];
-                    const Icon = meta?.icon || FileOutput;
+                  {proposedActions.map(action => {
+                    const style = sideEffectStyle(action.sideEffect);
+                    const Icon = style.icon;
+                    const isModifyVault = style.bucket === 'modify_vault';
+                    const isQuickClose = style.bucket === 'quick_close';
                     return (
                       <button
-                        key={action}
-                        onClick={() => patchIntentMutation.mutate(action)}
-                        disabled={patchIntentMutation.isPending}
-                        className="flex items-start gap-3 p-3 bg-white border border-purple-200 rounded-lg hover:bg-purple-50 hover:border-purple-300 transition-all text-left group"
-                      >
-                        <div className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center shrink-0 group-hover:bg-purple-200 transition-colors">
-                          <Icon className="w-4 h-4 text-purple-700" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-gray-900">{meta?.label || action}</p>
-                          <p className="text-xs text-gray-500 mt-0.5">{meta?.description}</p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Suggested Actions (no patch needed) */}
-            {suggestedNoPatchActions.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 text-xs text-gray-400 uppercase tracking-wider mb-2">
-                  <CheckCircle2 className="w-3 h-3" />
-                  Quick actions (no vault changes)
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {suggestedNoPatchActions.map(action => {
-                    const meta = ACTION_LABELS[action];
-                    const Icon = meta?.icon || CheckCircle2;
-                    const isDestructive = action === 'drop';
-                    return (
-                      <button
-                        key={action}
-                        onClick={() => {
-                          if (action === 'mark_done') markDoneMutation.mutate();
-                          else if (action === 'drop') {
-                            if (confirm('Are you sure you want to drop this case?')) dropMutation.mutate();
-                          }
-                        }}
-                        disabled={markDoneMutation.isPending || dropMutation.isPending}
+                        key={action.id}
+                        onClick={() => invokeNextMutation.mutate(action.id)}
+                        disabled={invokeNextMutation.isPending}
                         className={cn(
-                          'flex items-center gap-2 px-4 py-2 text-sm rounded-lg border transition-all',
-                          isDestructive
-                            ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
-                            : 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100'
+                          'flex items-start gap-3 p-3 bg-white border rounded-lg hover:bg-gray-50 transition-all text-left group',
+                          isModifyVault && 'border-purple-200 hover:bg-purple-50 hover:border-purple-300',
+                          isQuickClose && 'border-green-200 hover:bg-green-50 hover:border-green-300',
+                          !isModifyVault && !isQuickClose && 'border-gray-200 hover:bg-gray-50'
                         )}
                       >
-                        <Icon className="w-4 h-4" />
-                        {meta?.label || action}
+                        <div className={cn(
+                          'w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors',
+                          isModifyVault && 'bg-purple-100 group-hover:bg-purple-200',
+                          isQuickClose && 'bg-green-100 group-hover:bg-green-200',
+                          !isModifyVault && !isQuickClose && 'bg-gray-100 group-hover:bg-gray-200'
+                        )}>
+                          <Icon className={cn(
+                            'w-4 h-4',
+                            isModifyVault && 'text-purple-700',
+                            isQuickClose && 'text-green-700',
+                            !isModifyVault && !isQuickClose && 'text-gray-700'
+                          )} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-gray-900">{action.label}</p>
+                          <p className="text-xs text-gray-500 mt-0.5">{action.description}</p>
+                          <div className="flex flex-wrap gap-1 mt-1.5">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-mono">
+                              {action.intent}
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-50 text-gray-400 font-mono">
+                              {action.sideEffect}
+                            </span>
+                          </div>
+                        </div>
                       </button>
                     );
                   })}
@@ -339,10 +327,18 @@ export function ProposalReviewPage() {
         <button
           onClick={() => regenerateMutation.mutate()}
           disabled={regenerateMutation.isPending}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 border border-blue-200"
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition-all',
+            regenerateMutation.isPending
+              ? 'bg-blue-100 text-blue-400 border-blue-200 cursor-not-allowed'
+              : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border-blue-200'
+          )}
         >
-          <RotateCcw className={cn('w-4 h-4', regenerateMutation.isPending && 'animate-spin')} />
-          Regenerate
+          {regenerateMutation.isPending ? (
+            <><Loader2 className="w-4 h-4 animate-spin" /> Regenerating...</>
+          ) : (
+            <><RotateCcw className="w-4 h-4" /> Regenerate</>
+          )}
         </button>
         <button
           onClick={() => navigate(`/cases/${caseId}`)}

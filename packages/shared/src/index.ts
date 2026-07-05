@@ -7,9 +7,7 @@ export type CaseId = `case_${string}`;
 export type ArtifactId = `art_${string}`;
 export type EventId = `evt_${string}`;
 export type ProposalId = `prop_${string}`;
-export type PatchIntentId = `pi_${string}`;
-export type PatchManifestId = `patch_${string}`;
-export type ApplyManifestId = `apply_${string}`;
+export type AiRunId = `air_${string}`;
 export type JobId = `job_${string}`;
 
 // ---- Settings ----
@@ -130,7 +128,6 @@ export interface CaseRecord {
   status: CaseStatus;
   source: 'clipper' | 'manual' | 'obsidian_shortcut' | 'system';
   currentProposalId?: ProposalId;
-  currentPatchId?: PatchManifestId;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
@@ -152,10 +149,16 @@ export interface CaseDetail {
   artifact: Artifact;
   vaultPath?: string;  // PKWS settings vault path for Obsidian jump
   currentProposal?: Proposal;
-  currentPatch?: PatchManifest;
   instructionSummary?: CaseInstructionSummary;
   timeline: TimelineEvent[];
-  patchIntents: PatchIntent[];
+  /**
+   * Per-node AI run records for this case (line 2 / task #13). Newest first.
+   * Each row represents one AI invocation — kind='proposal' for an analyze
+   * pass that produces a Proposal, kind='turn' for an invoke-next round
+   * executed via the agent runtime. The frontend renders one AiRunCard per
+   * entry, surfacing rulesSnapshot/inputContext for transparency.
+   */
+  aiRuns: AiRun[];
 }
 
 // ---- Timeline ----
@@ -177,6 +180,7 @@ export type TimelineEventType =
   | 'apply_completed'
   | 'rollback_requested'
   | 'rollback_completed'
+  | 'vault_modified'
   | 'error_occurred';
 
 export interface TimelineEvent {
@@ -191,15 +195,21 @@ export interface TimelineEvent {
 
 // ---- Proposal ----
 export type ValueJudgement = 'high' | 'medium' | 'low' | 'drop';
-export type ProposalAction =
-  | 'mark_done'
-  | 'drop'
-  | 'move'
-  | 'append_summary'
-  | 'update_frontmatter'
-  | 'generate_formal_note'
-  | 'merge_later'
-  | 'need_more_research';
+
+/**
+ * One item of the AI-decided per-turn next-step menu. `intent` and
+ * `sideEffect` are free-form strings the AI fills itself; the UI groups
+ * buttons by them and renders unknown values with a neutral style.
+ */
+export interface ProposedNextAction {
+  id: string;
+  label: string;
+  description: string;
+  intent: string;
+  sideEffect: string;
+  /** Opaque JSON string the AI may stash anything in; returned verbatim on the next turn. */
+  payload?: string;
+}
 
 export interface Proposal {
   id: ProposalId;
@@ -208,34 +218,81 @@ export interface Proposal {
   title: string;
   summary: string;
   valueJudgement: ValueJudgement;
-  suggestedActions: ProposalAction[];
-  suggestedTargetPath?: string;
+  proposedNextActions: ProposedNextAction[];
   reasoningSummary: string;
   risks?: string[];
-  requiresPatch: boolean;
   rawJson?: string;
   createdAt: string;
 }
 
-// ---- Patch Intent ----
+// ---- AI Run ----
+// One row per AI turn on a case. Replaces the case-level single summary:
+// each AI processing node stores its own "raw inputs" snapshot so the user
+// can transparently see what was fed to the AI on that turn plus the result.
+//
+// Two write paths produce ai_runs rows:
+//   (a) generate_proposal path (kind='proposal') — the initial AI pass that
+//       returns a Proposal. Linked to the produced proposal row by proposalId.
+//   (b) invoke-next path (kind='turn') — a subsequent agent-runtime turn run
+//       in response to a user-picked ProposedNextAction. proposalId is null.
+//
+// Each row persists enough context to fully reconstruct what happened on that
+// turn without re-derivation: a snapshot of the workspace Rules at that time
+// (rulesSnapshotJson), the actual input context fed to the AI (inputContextJson),
+// the AI's numpyText output (outputSummary), the AI-decided next-step menu
+// (proposedNextActionsJson), and lifecycle bookkeeping (status / error /
+// timestamps / duration).
+export type AiRunKind = 'proposal' | 'turn';
+
+export type AiRunTrigger =
+  | 'auto_analyze'        // auto-analyze fired on capture
+  | 'user_explicit'       // user clicked Analyze on a Captured case
+  | 'user_invoke_next'    // user picked a ProposedNextAction (kind='turn')
+  | 'user_regenerate';    // user rejected the proposal and asked for a new one
+
+export type AiRunStatus = 'running' | 'succeeded' | 'failed' | 'aborted';
+
+export interface AiRun {
+  id: AiRunId;
+  caseId: CaseId;
+  kind: AiRunKind;
+  trigger: AiRunTrigger;
+  model: string;
+  status: AiRunStatus;
+  error?: string;
+  /** Snapshot of the workspace Rules (concatenated / JSON) fed to the AI this turn. */
+  rulesSnapshotJson: string;
+  /** The actual input context (note material / prior summary / user comments) fed this turn (JSON or raw text). */
+  inputContextJson: string;
+  /** Short summary of the AI output (proposal.summary for kind='proposal'; turn summary text otherwise). */
+  outputSummary?: string;
+  /** JSON of ProposedNextAction[] that the AI surfaced as the next-step menu. */
+  proposedNextActionsJson?: string;
+  /** Set on kind='proposal' success to link the produced row in `proposals`. */
+  proposalId?: ProposalId;
+  /** Which CLI produced this run: 'claude' | 'codex' | undefined (Job Queue path that doesn't shell out). */
+  agentId?: 'claude' | 'codex';
+  /** UUID the CLI was asked to use as --session-id; matches the first record of the transcript jsonl. */
+  sessionId?: string;
+  /** Absolute path on this machine of the transcript jsonl written by the CLI. Filled by cli-runner after the run. */
+  transcriptPath?: string;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  createdAt: string;
+}
+
+// ---- Patch Intent (action enum only; record types removed in favor of
+//      AI-decided ProposedNextAction[]). The 5 legacy action names are kept
+//      because agent-runtime/output-writer.ts still casts AI output ops to
+//      one of them when bridging to the old patch-manifest pipeline (which
+//      line 5 will retire when it switches agent-runtime to true vault writes).
 export type PatchIntentAction =
   | 'move'
   | 'update_frontmatter'
   | 'append_summary'
   | 'generate_formal_note'
   | 'create_index_link';
-
-export interface PatchIntent {
-  id: PatchIntentId;
-  caseId: CaseId;
-  proposalId?: ProposalId;
-  action: PatchIntentAction;
-  instruction?: string;
-  targetPath?: string;
-  status: 'pending' | 'generating' | 'generated' | 'cancelled' | 'error';
-  createdAt: string;
-  updatedAt: string;
-}
 
 // ---- Patch Operations ----
 export interface CreateFileOperation {
@@ -263,10 +320,15 @@ export interface MoveFileOperation {
 export type PatchOperation = CreateFileOperation | UpdateFileOperation | MoveFileOperation;
 
 // ---- Patch Manifest ----
+// NOTE: PatchManifest / PatchOperation / ApplyManifest and their id helpers
+// (genPatchManifestId / genApplyManifestId) are kept because packages/vault
+// still consumes them via executePatch / rollbackApply. Line 5 (task #16) will
+// retire that path (agent-runtime writes the true vault directly), after which
+// this whole block can be deleted along with PatchIntentAction above.
 export interface PatchManifest {
-  id: PatchManifestId;
+  id: `patch_${string}`;
   caseId: CaseId;
-  patchIntentId: PatchIntentId;
+  patchIntentId: `pi_${string}`;
   status: 'draft' | 'preview' | 'approved' | 'applied' | 'rejected' | 'error';
   operationsJson: string;
   baseFileHashesJson: string;
@@ -275,18 +337,10 @@ export interface PatchManifest {
   updatedAt: string;
 }
 
-export interface PatchPreview {
-  id: PatchManifestId;
-  status: PatchManifest['status'];
-  operations: PatchOperation[];
-  affectedFiles: string[];
-}
-
-// ---- Apply Manifest ----
 export interface ApplyManifest {
-  id: ApplyManifestId;
+  id: `apply_${string}`;
   caseId: CaseId;
-  patchManifestId: PatchManifestId;
+  patchManifestId: `patch_${string}`;
   status: 'applied' | 'rolled_back' | 'rollback_blocked';
   appliedOperationsJson: string;
   backupRefsJson: string;
@@ -296,8 +350,7 @@ export interface ApplyManifest {
 
 // ---- Case Instruction Summary ----
 export interface CaseInstructionSummary {
-  id: string;
-  caseId: CaseId;
+  id: string;  caseId: CaseId;
   summary: string;
   invalidatedItemsJson?: string;
   updatedBy: 'user' | 'system';
@@ -317,13 +370,14 @@ export interface WorkspaceRule {
 }
 
 // ---- Job ----
+// generate_patch / apply_patch / rollback_apply were the patch-orchestration
+// jobs from line 1; their handlers were removed in task #7 and no caller
+// enqueues them anymore. The remaining 3 jobs cover: scanning the inbox,
+// writing pkws IDs to artifacts, and generating the AI proposal.
 export type JobType =
   | 'scan_inbox'
   | 'write_pkws_id'
-  | 'generate_proposal'
-  | 'generate_patch'
-  | 'apply_patch'
-  | 'rollback_apply';
+  | 'generate_proposal';
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
@@ -369,22 +423,10 @@ export interface CommentRequest {
   updateInstructionSummary?: boolean;
 }
 
-// ---- Patch Intent Request ----
-export interface PatchIntentRequest {
-  action: PatchIntentAction;
-  instruction?: string;
-  targetPath?: string;
-}
-
-// ---- Approval ----
-export interface ApproveApplyRequest {
-  approvalNote?: string;
-}
-
-// ---- Rollback ----
-export interface RollbackRequest {
-  applyManifestId: ApplyManifestId;
-  reason?: string;
+// ---- Invoke Next Action (AI-decided menu pick) ----
+export interface InvokeNextRequest {
+  actionId: string;
+  feedback?: string;
 }
 
 // ---- Reopen ----

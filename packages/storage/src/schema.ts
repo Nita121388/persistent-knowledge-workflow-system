@@ -68,7 +68,6 @@ export const cases = sqliteTable('cases', {
   }).notNull(),
   source: text('source', { enum: ['clipper', 'manual', 'obsidian_shortcut', 'system'] }).notNull(),
   currentProposalId: text('current_proposal_id'),
-  currentPatchId: text('current_patch_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   closedAt: text('closed_at'),
@@ -97,59 +96,55 @@ export const proposals = sqliteTable('proposals', {
   title: text('title').notNull(),
   summary: text('summary').notNull(),
   valueJudgement: text('value_judgement', { enum: ['high', 'medium', 'low', 'drop'] }).notNull(),
-  suggestedActions: text('suggested_actions').notNull(), // JSON array
-  suggestedTargetPath: text('suggested_target_path'),
+  // AI-decided per-turn next-step menu; JSON of ProposedNextAction[] (see @pkws/shared).
+  // Each entry: {id,label,description,intent,sideEffect,payload?}. Free-form intent/sideEffect.
+  proposedNextActions: text('proposed_next_actions').notNull().default('[]'), // JSON array
   reasoningSummary: text('reasoning_summary').notNull(),
   risks: text('risks'), // JSON array
-  requiresPatch: integer('requires_patch', { mode: 'boolean' }).notNull(),
   rawJson: text('raw_json'),
   createdAt: text('created_at').notNull(),
 }, (table) => [
   index('idx_proposals_case').on(table.caseId),
 ]);
 
-export const patchIntents = sqliteTable('patch_intents', {
+// One row per AI turn on a case. See AiRun in @pkws/shared for the contract.
+// rulesSnapshot / inputContext are stored as JSON strings so each turn's
+// "raw materials" can be displayed transparently at the per-node level in
+// the case detail UI.
+export const aiRuns = sqliteTable('ai_runs', {
   id: text('id').primaryKey().notNull(),
   caseId: text('case_id').notNull().references(() => cases.id),
-  proposalId: text('proposal_id'),
-  action: text('action', {
-    enum: ['move', 'update_frontmatter', 'append_summary', 'generate_formal_note', 'create_index_link'],
+  kind: text('kind', { enum: ['proposal', 'turn'] }).notNull(),
+  trigger: text('trigger', {
+    enum: ['auto_analyze', 'user_explicit', 'user_invoke_next', 'user_regenerate'],
   }).notNull(),
-  instruction: text('instruction'),
-  targetPath: text('target_path'),
-  status: text('status', { enum: ['pending', 'generating', 'generated', 'cancelled', 'error'] }).notNull().default('pending'),
-  createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
-}, (table) => [
-  index('idx_pi_case').on(table.caseId),
-]);
-
-export const patchManifests = sqliteTable('patch_manifests', {
-  id: text('id').primaryKey().notNull(),
-  caseId: text('case_id').notNull().references(() => cases.id),
-  patchIntentId: text('patch_intent_id').notNull().references(() => patchIntents.id),
+  model: text('model').notNull(),
   status: text('status', {
-    enum: ['draft', 'preview', 'approved', 'applied', 'rejected', 'error'],
-  }).notNull().default('draft'),
-  operationsJson: text('operations_json').notNull(),
-  baseFileHashesJson: text('base_file_hashes_json').notNull(),
-  previewJson: text('preview_json'),
+    enum: ['running', 'succeeded', 'failed', 'aborted'],
+  }).notNull().default('running'),
+  error: text('error'),
+  rulesSnapshotJson: text('rules_snapshot_json').notNull(),
+  inputContextJson: text('input_context_json').notNull(),
+  outputSummary: text('output_summary'),
+  proposedNextActionsJson: text('proposed_next_actions_json'),
+  proposalId: text('proposal_id').references(() => proposals.id),
+  // Session/transcript telemetry — written by the CLI runner so each AI run
+  // can be reopened in its native session file. Both Claude Code and Codex
+  // support --session-id and write a jsonl transcript; the runtime learns
+  // the path after the run finishes (or finds it by walking the projects/
+  // sessions dirs first time the row is read).
+  agentId: text('agent_id'), // 'claude' | 'codex' | null
+  sessionId: text('session_id'),
+  transcriptPath: text('transcript_path'),
+  startedAt: text('started_at').notNull(),
+  finishedAt: text('finished_at'),
+  durationMs: integer('duration_ms'),
   createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
 }, (table) => [
-  index('idx_pm_case').on(table.caseId),
+  index('idx_ai_runs_case').on(table.caseId),
+  index('idx_ai_runs_kind').on(table.kind),
+  index('idx_ai_runs_status').on(table.status),
 ]);
-
-export const applyManifests = sqliteTable('apply_manifests', {
-  id: text('id').primaryKey().notNull(),
-  caseId: text('case_id').notNull().references(() => cases.id),
-  patchManifestId: text('patch_manifest_id').notNull().references(() => patchManifests.id),
-  status: text('status', { enum: ['applied', 'rolled_back', 'rollback_blocked'] }).notNull(),
-  appliedOperationsJson: text('applied_operations_json').notNull(),
-  backupRefsJson: text('backup_refs_json').notNull(),
-  appliedAt: text('applied_at').notNull(),
-  rolledBackAt: text('rolled_back_at'),
-});
 
 export const caseInstructionSummaries = sqliteTable('case_instruction_summaries', {
   id: text('id').primaryKey().notNull(),
@@ -174,7 +169,7 @@ export const workspaceRules = sqliteTable('workspace_rules', {
 export const jobs = sqliteTable('jobs', {
   id: text('id').primaryKey().notNull(),
   type: text('type', {
-    enum: ['scan_inbox', 'write_pkws_id', 'generate_proposal', 'generate_patch', 'apply_patch', 'rollback_apply'],
+    enum: ['scan_inbox', 'write_pkws_id', 'generate_proposal'],
   }).notNull(),
   status: text('status', { enum: ['queued', 'running', 'succeeded', 'failed', 'cancelled'] }).notNull().default('queued'),
   payloadJson: text('payload_json').notNull(),

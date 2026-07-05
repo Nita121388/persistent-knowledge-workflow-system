@@ -5,7 +5,6 @@ import { SetupWizard } from './pages/SetupWizard.js';
 import { Dashboard } from './pages/Dashboard.js';
 import { CaseDetailPage } from './pages/CaseDetail.js';
 import { ProposalReviewPage } from './pages/ProposalReview.js';
-import { PatchPreviewPage } from './pages/PatchPreview.js';
 import { SettingsPage } from './pages/Settings.js';
 import { AgentRuntimeDashboardPage } from './pages/AgentRuntimeDashboard.js';
 import { LogsPage } from './pages/Logs.js';
@@ -22,13 +21,15 @@ export default function App() {
 
   if (isLoading) return <LoadingScreen />;
 
-  // Only show setup wizard if we've definitively failed (not just a transient error)
-  if ((isError || !data?.ok) && failureCount >= 3) {
+  // Only show setup wizard if settings definitively don't exist (NOT_INITIALIZED or NOT_FOUND)
+  const errorCode = (!data?.ok && data?.error?.code) ? data.error.code : null;
+  const shouldShowSetup = (isError || errorCode === 'NOT_INITIALIZED' || errorCode === 'NOT_FOUND') && failureCount >= 3;
+
+  if (shouldShowSetup) {
     return <SetupWizard />;
   }
 
   // If settings API fails but we haven't exhausted retries, show a friendly message
-  // instead of jumping to setup
   if (isError || !data?.ok) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -47,7 +48,6 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/cases/:caseId" element={<CaseDetailPage />} />
         <Route path="/cases/:caseId/proposal" element={<ProposalReviewPage />} />
-        <Route path="/cases/:caseId/patch" element={<PatchPreviewPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/agent-runtime" element={<AgentRuntimeDashboardPage />} />
         <Route path="/settings/ai" element={<SettingsPage tab="ai" />} />

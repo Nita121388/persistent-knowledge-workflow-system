@@ -177,9 +177,8 @@ describe('output-parser', () => {
       title: 'Test Proposal',
       summary: 'A test summary',
       valueJudgement: 'high',
-      suggestedActions: ['mark_done'],
+      proposedNextActions: [],
       reasoningSummary: 'Because it is good',
-      requiresPatch: false,
     };
 
     // Validate schema directly
@@ -228,7 +227,7 @@ describe('output-parser', () => {
   it('should extract proposal from stdout when no file found', async () => {
     const { parseCliOutput } = await import('./output-parser.js');
     const stdout = `Some analysis text...
-{"title":"From Stdout","summary":"Extracted","valueJudgement":"medium","suggestedActions":["drop"],"reasoningSummary":"Test","requiresPatch":false}
+{"title":"From Stdout","summary":"Extracted","valueJudgement":"medium","proposedNextActions":[],"reasoningSummary":"Test"}
 More text...`;
 
     const result = parseCliOutput([], stdout);

@@ -1,11 +1,12 @@
 import type { CaseSession, CliResult } from './types.js';
+import path from 'node:path';
 import { Action, DEFAULTS } from './types.js';
-import { type CaseId } from '@pkws/shared';
+import { type CaseId, genAiRunId } from '@pkws/shared';
 import { buildContext, compressSession } from './context-builder.js';
 import type { CaseContextData } from './context-builder.js';
 import { runCliAgent, getAgentWorkDir, type CliRunnerOptions } from './cli-runner.js';
 import { parseCliOutput, type ParsedCliOutput } from './output-parser.js';
-import { writeProposal, writePatch, type OutputWriterOptions } from './output-writer.js';
+import { writeProposal, applyVaultOps, type OutputWriterOptions } from './output-writer.js';
 import type { SessionManager } from './session.js';
 
 /**
@@ -68,6 +69,35 @@ async function loadCaseData(db: any, schema: any, caseId: string): Promise<CaseC
 }
 
 /**
+ * Reload the workspace rules from the DB (line 2 / task #12).
+ *
+ * The scheduler captures rules into `session.workspaceRules` once at enqueue
+ * time (runtime.enqueueCase → sessionManager init). If the user edits a rule
+ * mid-session, that snapshot goes stale: every AI turn would still be fed the
+ * old rules, and the per-turn ai_runs row (scheduler.ts ~L253) would persist
+ * the stale rulesSnapshotJson. To keep each turn honest, the main loop calls
+ * this before buildContext() and overwrites session.workspaceRules with the
+ * current enabled-rule set ordered by priority — the same shape loadCaseData /
+ * the legacy handleGenerateProposal path use.
+ */
+function reloadWorkspaceRules(db: any, schema: any, session: CaseSession): void {
+  if (!db || !schema?.workspaceRules) return;
+  try {
+    const fresh = db.select()
+      .from(schema.workspaceRules)
+      .where(schema.workspaceRules.enabled.eq(true))
+      .orderBy(schema.workspaceRules.priority)
+      .all();
+    if (fresh && fresh.length >= 0) {
+      session.workspaceRules = fresh;
+    }
+  } catch (err) {
+    // Non-fatal: fall back to the existing session snapshot.
+    console.warn(`[reloadWorkspaceRules] Failed for session ${session.caseId}:`, err);
+  }
+}
+
+/**
  * Decide what action to take for a given session.
  */
 export function decideAction(session: CaseSession, config?: {
@@ -100,6 +130,8 @@ export interface SchedulerOptions {
   sessionManager: SessionManager;
   workspacePath: string;
   cliPath: string;
+  /** Which CLI family the cliPath refers to. Used to pick --session-id scheme + transcript lookup. */
+  agentId?: 'claude' | 'codex';
   db?: any;
   schema?: any;
   compressThreshold?: number;
@@ -134,6 +166,7 @@ export class Scheduler {
   private readonly sessionManager: SessionManager;
   private readonly workspacePath: string;
   private readonly cliPath: string;
+  private readonly agentId: 'claude' | 'codex' | undefined;
   private readonly compressThreshold: number;
   private readonly keepRecentCount: number;
   private readonly maxTokensPerSession: number;
@@ -154,6 +187,7 @@ export class Scheduler {
     this.sessionManager = opts.sessionManager;
     this.workspacePath = opts.workspacePath;
     this.cliPath = opts.cliPath;
+    this.agentId = opts.agentId;
     this.db = opts.db ?? null;
     this.schema = opts.schema ?? null;
     this.compressThreshold = opts.compressThreshold ?? DEFAULTS.contextCompressThreshold;
@@ -213,6 +247,10 @@ export class Scheduler {
       const session = this.sessionManager.get(caseId);
       if (!session) continue;
 
+      // Hoisted out of try{} so the catch can close an in-flight ai_runs row.
+      let aiRunId: ReturnType<typeof genAiRunId> | undefined;
+      let startedAtMs: number | undefined;
+
       try {
         const action = decideAction(session, {
           compressThreshold: this.compressThreshold,
@@ -229,14 +267,60 @@ export class Scheduler {
 
         // Build the CLAUDE.md context
         const caseData = await loadCaseData(this.db, this.schema, caseId);
+        // Line 2 / task #12: re-read enabled workspace rules from the DB on
+        // every turn so mid-session rule edits take effect immediately (and
+        // so the ai_runs.rowsSnapshotJson written below reflects current
+        // rules, not the enqueue-time snapshot).
+        reloadWorkspaceRules(this.db, this.schema, session);
         const context = buildContext(session, action, caseData);
 
         // Determine the agent work directory
         const workDir = getAgentWorkDir(this.workspacePath, caseId);
 
+        // ---- ai_runs: open a per-turn processing row (line 2) ----
+        // The scheduler is the agent-runtime entry-point that actually runs
+        // the AI on the invoke-next path (when /invoke-next chooses the
+        // agentRuntime branch instead of the generate_proposal fallback).
+        // Tag these as kind='turn', trigger='user_invoke_next'. The CLI agent
+        // path does not pseudo-refer to a proposals row, so proposalId stays
+        // null on every turn row. startedAt is captured before runCliAgent so
+        // durationMs reflects CLI wall time, not scheduler wait.
+        aiRunId = genAiRunId();
+        const startedAtIso = new Date().toISOString();
+        startedAtMs = Date.now();
+        const rulesSnapshotJson = JSON.stringify(
+          session.workspaceRules.map(r => ({ title: r.title, content: r.content, priority: r.priority })),
+        );
+        const inputContextJson = JSON.stringify({
+          action,
+          caseId,
+          caseData: caseData ? {
+            title: caseData.title,
+            sourceUrl: caseData.sourceUrl,
+            instructionSummary: caseData.instructionSummary,
+          } : undefined,
+          taskPrompt: context,
+          turnCount: session.turnCount,
+        });
+        if (this.db && this.schema?.aiRuns) {
+          (this.db as any).insert(this.schema.aiRuns).values({
+            id: aiRunId,
+            caseId,
+            kind: 'turn',
+            trigger: 'user_invoke_next',
+            model: this.cliPath,
+            status: 'running',
+            rulesSnapshotJson,
+            inputContextJson,
+            startedAt: startedAtIso,
+            createdAt: startedAtIso,
+          }).run();
+        }
+
         // Run the CLI agent
         const result = await runCliAgent({
           cliPath: this.cliPath,
+          agentId: this.agentId,
           workDir,
           taskPrompt: context,
           timeoutMs: this.cliTimeoutMs,
@@ -244,6 +328,32 @@ export class Scheduler {
           vaultPath: this.vaultPath,
           workspacePath: this.workspacePath,
         });
+
+        // Helper to close the ai_runs row opened above.
+        const closeAiRun = (
+          status: 'succeeded' | 'failed' | 'aborted',
+          payload: {
+            outputSummary?: string;
+            proposedNextActionsJson?: string;
+            error?: string;
+          },
+        ): void => {
+          if (!(this.db && this.schema?.aiRuns && startedAtMs)) return;
+          (this.db as any).update(this.schema.aiRuns)
+            .set({
+              status,
+              outputSummary: payload.outputSummary ?? null,
+              proposedNextActionsJson: payload.proposedNextActionsJson ?? null,
+              error: payload.error ?? null,
+              finishedAt: new Date().toISOString(),
+              durationMs: Date.now() - startedAtMs,
+              agentId: result.agentId ?? null,
+              sessionId: result.sessionId ?? null,
+              transcriptPath: result.transcriptPath ?? null,
+            })
+            .where((this.schema.aiRuns as any).id.eq(aiRunId))
+            .run();
+        };
 
         // Reset retry count on success
         this.retryCounts.delete(caseId);
@@ -271,16 +381,21 @@ export class Scheduler {
             }
           }
 
-          // Write patch to DB if found
-          if (parsed.patch && this.db && this.schema) {
+          // Apply vault operations directly to the real vault (line 5 /
+          // task #16). The CLI agent only emits patch-operations.json on a
+          // turn where the user has approved a modify_vault next-step via
+          // invoke-next; we apply immediately without staging as a DB row.
+          if (parsed.patch && this.db && this.schema && this.vaultPath) {
             try {
-              await writePatch(
+              const backupsPath = path.join(this.workspacePath, 'backups', caseId);
+              await applyVaultOps(
                 { db: this.db, schema: this.schema },
                 caseId,
                 parsed.patch.operations,
+                { vaultPath: this.vaultPath, backupsPath },
               );
             } catch (err: any) {
-              console.error(`[Scheduler] Failed to write patch for ${caseId}:`, err.message);
+              console.error(`[Scheduler] Failed to apply vault ops for ${caseId}:`, err.message);
             }
           }
 
@@ -326,12 +441,29 @@ export class Scheduler {
 
           this.emitEvent?.({ type: 'turn_completed', caseId, result });
           emitQueueUpdate(this);
+
+          // Close the ai_runs row for this turn. proposal (if produced) is
+          // mostly attached to a proposals-row pointer anyway; for turns the
+          // narrative result is the next-action menu snapshot itself.
+          closeAiRun('succeeded', {
+            outputSummary:
+              parsed.proposal
+                ? `Proposal: ${parsed.proposal.title} — ${(parsed.proposal.reasoningSummary ?? '').slice(0, 1000)}`
+                : (result.stdout.trim().slice(0, 1000) || undefined),
+            proposedNextActionsJson: parsed.proposal?.proposedNextActions
+              ? JSON.stringify(parsed.proposal.proposedNextActions)
+              : undefined,
+          });
         } else if (result.timedOut) {
           // Timeout — still record the partial output
           const partialContent = result.stdout.trim() || `*(timed out after ${this.cliTimeoutMs}ms)*`;
           this.sessionManager.appendMessage(caseId, 'assistant', partialContent);
           this.emitEvent?.({ type: 'turn_failed', caseId, error: `Timed out after ${this.cliTimeoutMs}ms` });
           emitQueueUpdate(this);
+          closeAiRun('failed', {
+            error: `Timed out after ${this.cliTimeoutMs}ms`,
+            outputSummary: result.stdout.trim().slice(0, 1000) || undefined,
+          });
 
           // Timeout: wait for user to decide retry
           session.awaitingUserInput = true;
@@ -342,6 +474,10 @@ export class Scheduler {
           this.sessionManager.appendMessage(caseId, 'assistant', `Error: ${errorMsg}`);
           this.emitEvent?.({ type: 'turn_failed', caseId, error: errorMsg });
           emitQueueUpdate(this);
+          closeAiRun('failed', {
+            error: errorMsg,
+            outputSummary: result.stderr.trim().slice(0, 1000) || undefined,
+          });
 
           // Retry up to maxRetries on non-timeout errors
           const retries = (this.retryCounts.get(caseId) ?? 0) + 1;
@@ -363,6 +499,21 @@ export class Scheduler {
         console.error(`[Scheduler] Error processing case ${caseId}:`, err);
         this.emitEvent?.({ type: 'turn_failed', caseId, error: err.message });
         emitQueueUpdate(this);
+
+        // Close any ai_runs row opened inside the try block so it does not
+        // linger forever in 'running' state when runCliAgent throws before
+        // reaching the inner status branches.
+        if (aiRunId && this.db && this.schema?.aiRuns && startedAtMs) {
+          (this.db as any).update(this.schema.aiRuns)
+            .set({
+              status: 'failed',
+              error: err?.message ?? String(err),
+              finishedAt: new Date().toISOString(),
+              durationMs: Date.now() - startedAtMs,
+            })
+            .where((this.schema.aiRuns as any).id.eq(aiRunId))
+            .run();
+        }
 
         // Error recovery: retry up to maxRetries times
         const retries = (this.retryCounts.get(caseId) ?? 0) + 1;

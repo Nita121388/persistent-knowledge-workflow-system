@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { CliResult } from './types.js';
 import { DEFAULTS } from './types.js';
+import { detectAgentIdFromPath } from './agent-detect.js';
 
 export interface CliRunnerOptions {
   cliPath: string;
@@ -16,6 +19,13 @@ export interface CliRunnerOptions {
   vaultPath?: string;
   /** Workspace path for context file isolation */
   workspacePath?: string;
+  /**
+   * Force which CLI family is being driven. If omitted, the runner detects it
+   * from the cliPath basename (see detectAgentIdFromPath). When the path is a
+   * custom binary the detection returns null and the runner degrades to a
+   * single-shot `--print` invocation with no session/transcript recording.
+   */
+  agentId?: 'claude' | 'codex';
 }
 
 /**
@@ -60,16 +70,27 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
 
   const startTime = Date.now();
 
+  // Resolve which CLI family we're driving and mint a session id. The session
+  // id is passed to the CLI as --session-id, and on-disk transcript files are
+  // located under that id (see locateTranscriptPath below).
+  const agentId = options.agentId ?? detectAgentIdFromPath(cliPath);
+  const sessionId = agentId ? crypto.randomUUID() : undefined;
+
   // On Windows, npm wrappers need shell for execution
   const isWindows = process.platform === 'win32';
-  const spawnCmd = isWindows ? process.env.COMSPEC || 'cmd.exe' : cliPath;
-  const spawnArgs = isWindows ? ['/c', cliPath, '--print', taskPrompt] : ['--print', taskPrompt];
+  const { spawnCmd, spawnArgs, spawnShell } = buildSpawnInvocation(
+    cliPath,
+    taskPrompt,
+    sessionId,
+    agentId,
+    isWindows,
+  );
 
   return new Promise<CliResult>((resolve) => {
     const child = spawn(spawnCmd, spawnArgs, {
       cwd: workDir,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: isWindows,
+      shell: spawnShell,
       env: {
         ...process.env,
         ...envVars,
@@ -125,6 +146,11 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
         outputFiles,
         timedOut,
         durationMs,
+        agentId: agentId ?? undefined,
+        sessionId,
+        transcriptPath: sessionId && agentId
+          ? locateTranscriptPath(agentId, sessionId, workDir, startTime)
+          : undefined,
       });
     });
 
@@ -138,6 +164,11 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
         outputFiles: [],
         timedOut: false,
         durationMs,
+        agentId: agentId ?? undefined,
+        sessionId,
+        transcriptPath: sessionId && agentId
+          ? locateTranscriptPath(agentId, sessionId, workDir, startTime)
+          : undefined,
       });
     });
   });
@@ -264,4 +295,165 @@ function copyVaultFilesForContext(vaultPath: string, targetDir: string): number 
   }
 
   return count;
+}
+
+/**
+ * Build the spawn invocation (command + args + shell flag) for whichever CLI
+ * family we're targeting.
+ *
+ * Claude Code headless mode:
+ *   `claude --print --input-format stream-json --output-format stream-json
+ *    --verbose --session-id <uuid> <taskPrompt>`
+ * A real jsonl transcript is written to ~/.claude/projects/<dir-slug>/<uuid>.jsonl
+ * where <dir-slug> is the workDir path with separators replaced by '-'.
+ *
+ * Codex headless mode:
+ *   `codex exec --session-id <uuid> <taskPrompt>`
+ * A jsonl rollout file is written to ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+ * and the session_id appears in the first session_meta record.
+ *
+ * Custom / unknown CLI:
+ *   falls back to the legacy `--print <taskPrompt>` single-shot, no session
+ *   recorded.
+ */
+function buildSpawnInvocation(
+  cliPath: string,
+  taskPrompt: string,
+  sessionId: string | undefined,
+  agentId: 'claude' | 'codex' | null,
+  isWindows: boolean,
+): { spawnCmd: string; spawnArgs: string[]; spawnShell: boolean } {
+  // On Windows the npm wrappers are .cmd/.ps1 scripts that need a shell
+  // to be executed; on POSIX we can exec the binary directly.
+  const wrapWindows = (args: string[]) =>
+    isWindows
+      ? { spawnCmd: process.env.COMSPEC || 'cmd.exe', spawnArgs: ['/c', cliPath, ...args], spawnShell: true }
+      : { spawnCmd: cliPath, spawnArgs: args, spawnShell: false };
+
+  if (agentId === 'claude' && sessionId) {
+    return wrapWindows([
+      '--print',
+      '--input-format', 'stream-json',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--session-id', sessionId,
+      taskPrompt,
+    ]);
+  }
+
+  if (agentId === 'codex' && sessionId) {
+    // `codex exec` runs the model non-interactively and writes a rollout file.
+    return wrapWindows(['exec', '--session-id', sessionId, taskPrompt]);
+  }
+
+  // Custom / unknown CLI — keep legacy single-shot behaviour.
+  return wrapWindows(['--print', taskPrompt]);
+}
+
+/**
+ * Resolve the transcript jsonl path on disk for a finished (or in-flight) CLI
+ * session. Best-effort: each CLI writes the file asynchronously, so on fast
+ * tests the file may not yet exist when the subprocess exits. The CLI writes
+ * under a deterministic location derived from --session-id / cwd / start time,
+ * so we resolve the location either by globbing or by reading session_meta.
+ *
+ * Claude: ~/.claude/projects/<dir-slug>/<sessionId>.jsonl directly.
+ *         (drizzle / Claude Code slug rule: absolute cwd with separators '.')
+ * Codex:  Walks $CODEX_HOME/sessions directory for rollout-*.jsonl (newest first)
+ *         and reads each first line to find one whose payload.session_id
+ *         matches sessionId.
+ */
+function locateTranscriptPath(
+  agentId: 'claude' | 'codex',
+  sessionId: string,
+  workDir: string,
+  startTimeMs: number,
+): string | undefined {
+  try {
+    if (agentId === 'claude') {
+      const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+      // Claude Code slug rule observed in the wild (Windows): the cwd path
+      // with backslashes replaced by '-' and drive colon stripped. Try a few
+      // candidate slugs and then fall back to a directory walk if none match.
+      const slugCandidates = new Set<string>();
+      const candidates = [
+        workDir.replace(/[\\/]+/g, '-').replace(/^-+|-+$/g, ''),
+        workDir.replace(/[\\/]+/g, '-'),
+        workDir.replace(/:/g, '').replace(/\\/g, '-'),
+        workDir.toUpperCase().replace(/:/g, '').replace(/\\/g, '-'),
+      ];
+      for (const c of candidates) if (c) slugCandidates.add(c);
+      for (const slug of slugCandidates) {
+        const p = path.join(projectsDir, slug, `${sessionId}.jsonl`);
+        if (fs.existsSync(p)) return p;
+      }
+      // Fall back to scanning project dirs for the session file (in case the
+      // slug rule changed across CLI versions). Cap at 200 dirs / 30 sessions.
+      if (fs.existsSync(projectsDir)) {
+        const dirs = fs.readdirSync(projectsDir).slice(0, 200);
+        for (const d of dirs) {
+          const p = path.join(projectsDir, d, `${sessionId}.jsonl`);
+          if (fs.existsSync(p)) return p;
+        }
+      }
+      // File not flushed yet — return the most likely path so the UI can
+      // still attempt to open it (or the user can refresh later).
+      const guessSlug = candidates[0] || 'unknown';
+      return path.join(projectsDir, guessSlug, `${sessionId}.jsonl`);
+    }
+
+    if (agentId === 'codex') {
+      const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+      const sessionsRoot = path.join(codexHome, 'sessions');
+      if (!fs.existsSync(sessionsRoot)) return undefined;
+      // Codex logs sessions under YYYY/MM/DD/, newest Codex internal seconds
+      // values are written lexically comparable. Walk newest-first.
+      const rolloutFiles: string[] = [];
+      walkCodexSessions(sessionsRoot, startTimeMs, rolloutFiles, 500);
+      // Read each first line, newest first, find the matching session_id.
+      for (const fp of rolloutFiles) {
+        try {
+          const fd = fs.openSync(fp, 'r');
+          const buf = Buffer.alloc(2048);
+          const n = fs.readSync(fd, buf, 0, 2048, 0);
+          fs.closeSync(fd);
+          if (n <= 0) continue;
+          const firstLine = buf.toString('utf-8', 0, n).split('\n')[0] ?? '';
+          if (firstLine.includes(sessionId)) return fp;
+        } catch {
+          // read error — try next
+        }
+      }
+      return undefined;
+    }
+  } catch {
+    // Best-effort — leave caller with undefined.
+  }
+  return undefined;
+}
+
+/**
+ * Walk a Codex sessions/ tree newest-first. We use the start timestamp to
+ * prune: Codex organises files under YYYY/MM/DD/, so we only descend into
+ * leaf day dirs whose ISO date string is at-or-before the run started (the
+ * run's own session file is placed AFTER spawn, so we expect today's date).
+ */
+function walkCodexSessions(dir: string, runStartMs: number, out: string[], limit: number): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  // Sort dirs/files newest-first by name for date-shaped entries.
+  const sorted = entries.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+  for (const e of sorted) {
+    if (out.length >= limit) return;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      walkCodexSessions(full, runStartMs, out, limit);
+    } else if (e.isFile() && e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
+      out.push(full);
+    }
+  }
 }

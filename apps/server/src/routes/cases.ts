@@ -1,8 +1,9 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { exec } from 'node:child_process';
 import { getDb, schema } from '@pkws/storage';
 import { eq, desc, like, inArray, and } from 'drizzle-orm';
-import { CommentRequestSchema, type CaseId, type CaseStatus } from '@pkws/shared';
-import type { CaseDetail, CaseListItem } from '@pkws/shared';
+import { CommentRequestSchema, InvokeNextRequestSchema, type CaseId, type CaseStatus } from '@pkws/shared';
+import type { CaseDetail, CaseListItem, ProposedNextAction } from '@pkws/shared';
 import { genEventId, ReopenRequestSchema } from '@pkws/shared/utils.js';
 import { agentRuntime } from '../index.js';
 
@@ -28,12 +29,18 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     let conditions = [];
 
     // Queue filter: inbox / review / active / closed
+    // PatchPreview is a legacy patch-orchestration status (line 1). Under
+    // the unified ai_turn model it no longer enters the review queue, so it
+    // is bucketed into `closed` along with other patch-era terminal states
+    // (Approved / Applying / RolledBack), whose agent-runtime writers will
+    // be retired in task #16. Until then they only ever appear on legacy
+    // rows already in the DB.
     if (query.queue) {
       const statusMap: Record<string, CaseStatus[]> = {
         inbox: ['Captured', 'Analyzing'],
-        review: ['ReviewRequired', 'NeedDiscussion', 'PatchPreview'],
+        review: ['ReviewRequired', 'NeedDiscussion'],
         active: ['Approved', 'Applying'],
-        closed: ['Done', 'Dropped', 'Rejected', 'Error', 'RolledBack'],
+        closed: ['Done', 'Dropped', 'Rejected', 'Error', 'RolledBack', 'PatchPreview'],
       };
       const statuses = statusMap[query.queue];
       if (statuses) {
@@ -133,19 +140,10 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       if (raw) {
         currentProposal = {
           ...raw,
-          suggestedActions: typeof raw.suggestedActions === 'string' ? JSON.parse(raw.suggestedActions) : raw.suggestedActions,
+          proposedNextActions: typeof raw.proposedNextActions === 'string' ? JSON.parse(raw.proposedNextActions) : raw.proposedNextActions,
           risks: raw.risks ? (typeof raw.risks === 'string' ? JSON.parse(raw.risks) : raw.risks) : undefined,
-          requiresPatch: !!raw.requiresPatch,
         };
       }
-    }
-
-    let currentPatch = undefined;
-    if (caseRow.currentPatchId) {
-      currentPatch = await db.select()
-        .from(schema.patchManifests)
-        .where(eq(schema.patchManifests.id, caseRow.currentPatchId))
-        .get() as any;
     }
 
     const instructionSummary = await db.select()
@@ -153,11 +151,21 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       .where(eq(schema.caseInstructionSummaries.caseId, caseId))
       .get() as any;
 
-    const patchIntents = await db.select()
-      .from(schema.patchIntents)
-      .where(eq(schema.patchIntents.caseId, caseId))
-      .orderBy(desc(schema.patchIntents.createdAt))
-      .all() as any;
+    // Line 2 / task #13: pull per-node AI runs for transparency UI. Newest
+    // first; capped to keep payloads bounded (the AiRunList is virtualized
+    // client-side, but the API response should not be uncapped).
+    const aiRunRows = await db.select()
+      .from(schema.aiRuns)
+      .where(eq(schema.aiRuns.caseId, caseId))
+      .orderBy(desc(schema.aiRuns.createdAt))
+      .limit(200)
+      .all() as any[];
+    const aiRuns = aiRunRows.map(row => ({
+      ...row,
+      // Storage persists these as TEXT (JSON); caseDetail route already
+      // applies the same parse pattern for currentProposal fields.
+      proposedNextActionsJson: row.proposedNextActionsJson ?? undefined,
+    }));
 
     const detail: CaseDetail = {
       case: caseRow as any,
@@ -165,13 +173,55 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       artifact: artifact as any,
       vaultPath: getVaultPath(),
       currentProposal,
-      currentPatch,
       instructionSummary: instructionSummary || undefined,
       timeline: timeline as any,
-      patchIntents,
+      aiRuns: aiRuns as any,
     };
 
     return { ok: true, data: detail };
+  });
+
+  // POST /cases/:caseId/ai-runs/:runId/open-transcript
+  // Opens this AI run's transcript jsonl in the user's default editor.
+  // Only meaningful for runs whose CLI wrote a transcript file (Claude Code /
+  // Codex headless). generate_proposal-path rows have no transcript and
+  // return 409.
+  app.post('/cases/:caseId/ai-runs/:runId/open-transcript', async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const db = getDb();
+    const row = db.select()
+      .from(schema.aiRuns)
+      .where(eq(schema.aiRuns.id, runId))
+      .get() as any;
+    if (!row) {
+      reply.code(404); return { ok: false, error: 'ai_run_not_found' };
+    }
+    const p = row.transcriptPath;
+    if (!p) {
+      reply.code(409);
+      return {
+        ok: false,
+        error: 'no_transcript',
+        message: 'This AI run used an API call (no CLI session file) or the transcript path is unavailable.',
+      };
+    }
+    // Open with the OS's default JSONL handler. On Windows the leading "" is
+    // required so `start` doesn't treat a quoted path as a window title.
+    const platform = process.platform;
+    const cmd = platform === 'win32'
+      ? `start "" "${p}"`
+      : platform === 'darwin'
+        ? `open "${p}"`
+        : `xdg-open "${p}"`;
+    exec(cmd, (err) => {
+      if (err) {
+        request.log.error({ err, cmd }, 'failed to open transcript');
+      }
+    });
+    return {
+      ok: true,
+      data: { transcriptPath: p, sessionId: row.sessionId, agentId: row.agentId },
+    };
   });
 
   // POST /cases/:caseId/comment
@@ -269,14 +319,179 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
       return { ok: true, data: { success: true, mode: 'agent-runtime' } };
     }
 
-    // Fallback: use the existing job queue path
+    // Cancel any existing pending/queued generate_proposal jobs for this case
+    // to prevent race conditions when user submits multiple comments
     const { createJob } = await import('../worker/job-queue.js');
+    const existingJobs = await db.select()
+      .from(schema.jobs)
+      .where(
+        and(
+          eq(schema.jobs.type, 'generate_proposal'),
+          like(schema.jobs.payloadJson, `%${caseId}%`),
+          inArray(schema.jobs.status, ['queued', 'running'])
+        )
+      )
+      .all();
+    for (const oldJob of existingJobs) {
+      db.update(schema.jobs)
+        .set({ status: 'cancelled', finishedAt: new Date().toISOString() })
+        .where(eq(schema.jobs.id, oldJob.id))
+        .run();
+    }
+
+    // Fallback: use the existing job queue path
     await createJob({
       type: 'generate_proposal',
       payload: { caseId, reason: 'user_comment', comment },
     });
 
     return { ok: true, data: { success: true, mode: 'job-queue' } };
+  });
+
+  // POST /cases/:caseId/invoke-next
+  // User picked one of the AI-proposed next-step buttons (ProposedNextAction).
+  // The backend looks up the picked action in the case's current proposal,
+  // feeds the action's intent/sideEffect/payload back to the next AI turn as
+  // user input, then enqueues a regenerate — same shape as /comment.
+  // Vault writing, when applicable (sideEffect == 'modify_vault'), is
+  // performed by the next AI turn itself (handled by line 5 sandbox changes),
+  // NOT by this route.
+  app.post('/cases/:caseId/invoke-next', async (request, reply) => {
+    const { caseId } = request.params as { caseId: string };
+    const parsed = InvokeNextRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Invalid invoke-next request', details: parsed.error.flatten() },
+      });
+    }
+
+    const db = getDb();
+    const { actionId, feedback } = parsed.data;
+
+    // Look up the picked action on the case's current proposal
+    const caseRow = await db.select()
+      .from(schema.cases)
+      .where(eq(schema.cases.id, caseId))
+      .get();
+    if (!caseRow) {
+      return reply.status(404).send({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Case not found' },
+      });
+    }
+
+    let action: ProposedNextAction | undefined;
+    if (caseRow.currentProposalId) {
+      const proposalRow = await db.select()
+        .from(schema.proposals)
+        .where(eq(schema.proposals.id, caseRow.currentProposalId))
+        .get() as any;
+      if (proposalRow) {
+        const actions = typeof proposalRow.proposedNextActions === 'string'
+          ? JSON.parse(proposalRow.proposedNextActions)
+          : proposalRow.proposedNextActions;
+        action = (actions as ProposedNextAction[])?.find(a => a?.id === actionId);
+      }
+    }
+
+    if (!action) {
+      return reply.status(404).send({
+        ok: false,
+        error: { code: 'ACTION_NOT_FOUND', message: `Action ${actionId} not found on case's current proposal` },
+      });
+    }
+
+    // Compose the user-input string that the next AI turn will receive.
+    // The picked action's intent/sideEffect/payload are echoed back so the
+    // next-turn AI sees what it proposed last turn and what the user picked.
+    const pickedMessage = [
+      `[User picked action: ${action.label}]`,
+      `intent: ${action.intent}`,
+      `sideEffect: ${action.sideEffect}`,
+      action.description ? `description: ${action.description}` : '',
+      action.payload ? `payload: ${action.payload}` : '',
+      feedback ? `user feedback: ${feedback}` : '',
+    ].filter(Boolean).join('\n');
+
+    // Record timeline event
+    db.insert(schema.timelineEvents).values({
+      id: genEventId(),
+      caseId,
+      type: 'user_commented',
+      actor: 'user',
+      summary: pickedMessage,
+      dataJson: JSON.stringify({
+        actionId,
+        intent: action.intent,
+        sideEffect: action.sideEffect,
+        payload: action.payload,
+        feedback,
+      }),
+      createdAt: new Date().toISOString(),
+    }).run();
+
+    // Update case status
+    db.update(schema.cases)
+      .set({
+        status: 'NeedDiscussion',
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.cases.id, caseId))
+      .run();
+
+    // If Agent Runtime is active, route the input there
+    if (agentRuntime) {
+      const rules = await db.select()
+        .from(schema.workspaceRules)
+        .where(eq(schema.workspaceRules.enabled, true))
+        .orderBy(schema.workspaceRules.priority)
+        .all();
+
+      const instructionSummary = await db.select()
+        .from(schema.caseInstructionSummaries)
+        .where(eq(schema.caseInstructionSummaries.caseId, caseId))
+        .get();
+
+      agentRuntime.enqueueCase(caseId as CaseId, {
+        workspaceRules: rules,
+        caseInstructions: instructionSummary?.summary || '',
+      });
+      agentRuntime.onUserInput(caseId as CaseId, pickedMessage);
+
+      return { ok: true, data: { success: true, mode: 'agent-runtime', action } };
+    }
+
+    // Fallback: cancel existing queued/running generate_proposal jobs, then enqueue a new one
+    const { createJob } = await import('../worker/job-queue.js');
+    const existingJobs = await db.select()
+      .from(schema.jobs)
+      .where(
+        and(
+          eq(schema.jobs.type, 'generate_proposal'),
+          like(schema.jobs.payloadJson, `%${caseId}%`),
+          inArray(schema.jobs.status, ['queued', 'running'])
+        )
+      )
+      .all();
+    for (const oldJob of existingJobs) {
+      db.update(schema.jobs)
+        .set({ status: 'cancelled', finishedAt: new Date().toISOString() })
+        .where(eq(schema.jobs.id, oldJob.id))
+        .run();
+    }
+
+    await createJob({
+      type: 'generate_proposal',
+      payload: {
+        caseId,
+        reason: 'user_invoke_next',
+        actionId,
+        message: pickedMessage,
+      },
+    });
+
+    return { ok: true, data: { success: true, mode: 'job-queue', action } };
   });
 
   // POST /cases/:caseId/mark-done
@@ -483,54 +698,6 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, data: { jobId: job.id } };
   });
 
-  // POST /cases/:caseId/patch-intents
-  app.post('/cases/:caseId/patch-intents', async (request, reply) => {
-    const { caseId } = request.params as { caseId: string };
-    const { PatchIntentRequestSchema: PISchema } = await import('@pkws/shared/utils.js');
-    const parsed = PISchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        ok: false,
-        error: { code: 'VALIDATION_ERROR', message: 'Invalid patch intent', details: parsed.error.flatten() },
-      });
-    }
-
-    const db = getDb();
-    const { genPatchIntentId } = await import('@pkws/shared/utils.js');
-
-    const piId = genPatchIntentId();
-    const now = new Date().toISOString();
-
-    db.insert(schema.patchIntents).values({
-      id: piId,
-      caseId,
-      action: parsed.data.action,
-      instruction: parsed.data.instruction || null,
-      targetPath: parsed.data.targetPath || null,
-      status: 'pending',
-      createdAt: now,
-      updatedAt: now,
-    }).run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'patch_intent_created',
-      actor: 'user',
-      summary: `User requested patch: ${parsed.data.action} ${parsed.data.targetPath || ''}`,
-      createdAt: now,
-    }).run();
-
-    // Create job to generate the patch
-    const { createJob } = await import('../worker/job-queue.js');
-    const job = await createJob({
-      type: 'generate_patch',
-      payload: { caseId, patchIntentId: piId, action: parsed.data.action },
-    });
-
-    return { ok: true, data: { patchIntentId: piId, jobId: job.id } };
-  });
-
   // GET /cases/:caseId/proposals
   app.get('/cases/:caseId/proposals', async (request, reply) => {
     const { caseId } = request.params as { caseId: string };
@@ -545,185 +712,10 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, data: proposals };
   });
 
-  // GET /cases/:caseId/patch-intents
-  app.get('/cases/:caseId/patch-intents', async (request, reply) => {
-    const { caseId } = request.params as { caseId: string };
-    const db = getDb();
-
-    const intents = await db.select()
-      .from(schema.patchIntents)
-      .where(eq(schema.patchIntents.caseId, caseId))
-      .orderBy(desc(schema.patchIntents.createdAt))
-      .all() as any;
-
-    return { ok: true, data: intents };
-  });
-
-  // GET /cases/:caseId/patches/:patchId
-  app.get('/cases/:caseId/patches/:patchId', async (request, reply) => {
-    const { patchId } = request.params as { patchId: string };
-    const db = getDb();
-
-    const patch = await db.select()
-      .from(schema.patchManifests)
-      .where(eq(schema.patchManifests.id, patchId))
-      .get() as any;
-
-    if (!patch) {
-      return reply.status(404).send({
-        ok: false,
-        error: { code: 'NOT_FOUND', message: 'Patch not found' },
-      });
-    }
-
-    const operations = JSON.parse(patch.operationsJson);
-    const affectedFiles: string[] = [];
-    for (const op of operations) {
-      if (op.type === 'create_file') affectedFiles.push(op.path);
-      else if (op.type === 'update_file') affectedFiles.push(op.path);
-      else if (op.type === 'move_file') affectedFiles.push(op.fromPath, op.toPath);
-    }
-
-    return {
-      ok: true,
-      data: {
-        id: patch.id,
-        status: patch.status,
-        operations,
-        affectedFiles: [...new Set(affectedFiles)],
-        previewJson: patch.previewJson ? JSON.parse(patch.previewJson) : undefined,
-      },
-    };
-  });
-
-  // POST /cases/:caseId/patches/:patchId/reject
-  app.post('/cases/:caseId/patches/:patchId/reject', async (request, reply) => {
-    const { caseId, patchId } = request.params as { caseId: string; patchId: string };
-    const db = getDb();
-
-    db.update(schema.patchManifests)
-      .set({ status: 'rejected', updatedAt: new Date().toISOString() })
-      .where(eq(schema.patchManifests.id, patchId))
-      .run();
-
-    db.update(schema.cases)
-      .set({ status: 'ReviewRequired', updatedAt: new Date().toISOString() })
-      .where(eq(schema.cases.id, caseId))
-      .run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'patch_rejected',
-      actor: 'user',
-      summary: 'User rejected the patch',
-      createdAt: new Date().toISOString(),
-    }).run();
-
-    return { ok: true, data: { success: true } };
-  });
-
-  // POST /cases/:caseId/patches/:patchId/approve-apply
-  app.post('/cases/:caseId/patches/:patchId/approve-apply', async (request, reply) => {
-    const { caseId, patchId } = request.params as { caseId: string; patchId: string };
-    const db = getDb();
-
-    const patch = await db.select()
-      .from(schema.patchManifests)
-      .where(eq(schema.patchManifests.id, patchId))
-      .get();
-
-    if (!patch) {
-      return reply.status(404).send({
-        ok: false,
-        error: { code: 'NOT_FOUND', message: 'Patch not found' },
-      });
-    }
-
-    if (patch.status !== 'preview') {
-      return reply.status(400).send({
-        ok: false,
-        error: { code: 'PATCH_NOT_APPROVED', message: `Patch status is '${patch.status}', expected 'preview'` },
-      });
-    }
-
-    // Approve and create apply job
-    db.update(schema.patchManifests)
-      .set({ status: 'approved', updatedAt: new Date().toISOString() })
-      .where(eq(schema.patchManifests.id, patchId))
-      .run();
-
-    db.update(schema.cases)
-      .set({ status: 'Approved', updatedAt: new Date().toISOString() })
-      .where(eq(schema.cases.id, caseId))
-      .run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'patch_approved',
-      actor: 'user',
-      summary: 'User approved the patch',
-      createdAt: new Date().toISOString(),
-    }).run();
-
-    const { createJob } = await import('../worker/job-queue.js');
-    const job = await createJob({
-      type: 'apply_patch',
-      payload: { caseId, patchManifestId: patchId },
-    });
-
-    return { ok: true, data: { jobId: job.id } };
-  });
-
-  // POST /cases/:caseId/rollback
-  app.post('/cases/:caseId/rollback', async (request, reply) => {
-    const { caseId } = request.params as { caseId: string };
-    const db = getDb();
-
-    // Find the latest apply manifest for this case
-    const apply = await db.select()
-      .from(schema.applyManifests)
-      .where(eq(schema.applyManifests.caseId, caseId))
-      .orderBy(desc(schema.applyManifests.appliedAt))
-      .get();
-
-    if (!apply) {
-      return reply.status(404).send({
-        ok: false,
-        error: { code: 'NOT_FOUND', message: 'No apply manifest found for rollback' },
-      });
-    }
-
-    if (apply.status === 'rolled_back') {
-      return reply.status(400).send({
-        ok: false,
-        error: { code: 'CONFLICT', message: 'This apply has already been rolled back' },
-      });
-    }
-
-    db.update(schema.cases)
-      .set({ status: 'RolledBack', updatedAt: new Date().toISOString() })
-      .where(eq(schema.cases.id, caseId))
-      .run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'rollback_requested',
-      actor: 'user',
-      summary: `User requested rollback of apply ${apply.id}`,
-      createdAt: new Date().toISOString(),
-    }).run();
-
-    const { createJob } = await import('../worker/job-queue.js');
-    const job = await createJob({
-      type: 'rollback_apply',
-      payload: { caseId, applyManifestId: apply.id },
-    });
-
-    return { ok: true, data: { jobId: job.id } };
-  });
+  // NOTE: Patch-orchestration routes (POST/GET /patch-intents, GET /patches/:id,
+  // POST /patches/:id/reject, /approve-apply, /rollback) have been removed.
+  // Vault modifications now flow through AI self-decided ProposedNextAction
+  // picks via POST /cases/:caseId/invoke-next.
 
   // GET /cases/:caseId/timeline
   app.get('/cases/:caseId/timeline', async (request, reply) => {

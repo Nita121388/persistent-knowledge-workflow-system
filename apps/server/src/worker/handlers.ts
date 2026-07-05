@@ -1,13 +1,12 @@
 import { getDb, schema } from '@pkws/storage';
 import { eq, and, like, inArray } from 'drizzle-orm';
-import { generateProposal, generatePatchContent, getAiConfig } from '@pkws/ai';
-import { readMarkdown, computeHash, writePkwsId, executePatch, rollbackApply, scanMarkdownFiles } from '@pkws/vault';
+import { generateProposal, getAiConfig } from '@pkws/ai';
+import { readMarkdown, computeHash, writePkwsId, scanMarkdownFiles } from '@pkws/vault';
 import {
-  genAnchorId, genArtifactId, genCaseId, genEventId,
-  genPatchManifestId,
+  genAnchorId, genArtifactId, genCaseId, genEventId, genAiRunId,
   type Job,
 } from '@pkws/shared/utils.js';
-import type { Settings, KnowledgeAnchor } from '@pkws/shared';
+import type { Settings, KnowledgeAnchor, AiRunKind, AiRunTrigger } from '@pkws/shared';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -94,15 +93,6 @@ export async function handleJob(job: Job) {
       break;
     case 'generate_proposal':
       await handleGenerateProposal(job);
-      break;
-    case 'generate_patch':
-      await handleGeneratePatch(job);
-      break;
-    case 'apply_patch':
-      await handleApplyPatch(job);
-      break;
-    case 'rollback_apply':
-      await handleRollbackApply(job);
       break;
   }
 }
@@ -216,8 +206,13 @@ async function handleScanInbox(job: Job) {
         .run();
     }
 
-    // Check if there's already a pending case for this anchor
-    const pendingStatuses: any = ['Captured', 'Analyzing', 'ReviewRequired', 'NeedDiscussion', 'PatchPreview', 'Approved', 'Applying'];
+    // Check if there's already a pending case for this anchor.
+    // PatchPreview is no longer written under the unified ai_turn model
+    // (task #9), but Approved / Applying remain here so legacy rows in
+    // those patch-orchestration states still count as "occupied" and
+    // block re-capture. They will be removed in task #16 once the
+    // agent-runtime writers retire for good.
+    const pendingStatuses: any = ['Captured', 'Analyzing', 'ReviewRequired', 'NeedDiscussion', 'Approved', 'Applying'];
     const existingCase = await db.select()
       .from(schema.cases)
       .where(
@@ -387,9 +382,58 @@ async function handleGenerateProposal(job: Job) {
     .orderBy(schema.workspaceRules.priority)
     .all();
 
+  const rulesSnapshotJson = JSON.stringify(
+    rules.map(r => ({ title: r.title, content: r.content, priority: r.priority })),
+  );
+
+  // ---- ai_runs: open a per-node AI processing row (line 2) ----
+  // This row persists what the AI was fed this turn (rulesSnapshot +
+  // inputContextJson) plus the result. kind/trigger are inferred from the
+  // enqueue reason that scan_inbox / /analyze / /comment / /regenerate /
+  // /invoke-next set on the job payload:
+  //   undefined                 → auto_analyze (scan_inbox auto-schedule)
+  //   'user_requested_analysis' → user_explicit (manual Analyze on Captured)
+  //   'user_requested_regenerate' / 'user_comment' (with existing proposal)
+  //                            → user_regenerate
+  //   'user_invoke_next'        → user_invoke_next (invoke-next fallback path)
+  const reason = (payload as Record<string, unknown>).reason as
+    | 'user_requested_analysis' | 'user_requested_regenerate'
+    | 'user_comment' | 'user_invoke_next' | undefined;
+  const hasExistingProposal = !!caseRow.currentProposalId;
+  let trigger: AiRunTrigger;
+  if (reason === 'user_invoke_next') trigger = 'user_invoke_next';
+  else if (reason === 'user_requested_analysis') trigger = 'user_explicit';
+  else if (reason === 'user_requested_regenerate') trigger = 'user_regenerate';
+  else if (reason === 'user_comment') trigger = hasExistingProposal ? 'user_regenerate' : 'user_explicit';
+  else trigger = 'auto_analyze'; // scan_inbox auto-schedule carries no reason
+  // invoke-next route falls back to generate_proposal handler; tag those
+  // iterations as 'turn' so the case-detail AI nodes list can distinguish
+  // proposal passes from invoke-next turns. proposalId stays null on turns.
+  const kind: AiRunKind = reason === 'user_invoke_next' ? 'turn' : 'proposal';
+
   const frontmatterStr = md.data && Object.keys(md.data).length > 0
     ? JSON.stringify(md.data, null, 2)
     : undefined;
+
+  // Build the input-context snapshot we will both feed the AI and persist
+  // to ai_runs so each node's "raw materials" are transparent.
+  const pickedActionEcho = reason === 'user_invoke_next' && payload.message
+    ? (payload.message as string)
+    : undefined;
+  const inputContext = {
+    artifact: {
+      id: artifact.id,
+      vaultPath: artifact.vaultPath,
+      title: artifact.title,
+      sourceUrl: artifact.sourceUrl,
+    },
+    frontmatter: md.data && Object.keys(md.data).length > 0 ? md.data : undefined,
+    contentBody: md.body,
+    instructionSummary: instructionSummary?.summary,
+    conversationHistory: undefined as string | undefined, // filled after ctx build below
+    userComment,
+    pickedActionEcho,
+  };
 
   // Call AI — with memory context
   db.insert(schema.timelineEvents).values({
@@ -409,20 +453,58 @@ async function handleGenerateProposal(job: Job) {
     appendToContext(ctx, 'user', userComment);
   }
 
-  const proposal = await generateProposal(
-    {
-      title: artifact.title || 'Untitled',
-      contentBody: md.body,
-      sourceUrl: artifact.sourceUrl,
-      frontmatterContext: frontmatterStr,
-      instructionSummary: instructionSummary?.summary,
-      workspaceRules: rules.map(r => `[${r.title}] ${r.content}`).join('\n'),
-      conversationHistory: ctx.messages.length > 0
-        ? buildContextPrompt(ctx, '')
-        : undefined,
-    },
+  const conversationHistory = ctx.messages.length > 0
+    ? buildContextPrompt(ctx, '')
+    : undefined;
+  inputContext.conversationHistory = conversationHistory;
+
+  const inputContextJson = JSON.stringify(inputContext);
+
+  // Open the ai_runs row now (running). startedAt is recorded before the AI
+  // call so durationMs reflects real AI latency, not queue wait.
+  const aiRunId = genAiRunId();
+  const startedAtIso = new Date().toISOString();
+  const startedAtMs = Date.now();
+  db.insert(schema.aiRuns).values({
+    id: aiRunId,
     caseId,
-  );
+    kind,
+    trigger,
+    model: sRow?.aiDefaultModel ?? 'unknown',
+    status: 'running',
+    rulesSnapshotJson,
+    inputContextJson,
+    startedAt: startedAtIso,
+    createdAt: startedAtIso,
+  }).run();
+
+  let proposal;
+  try {
+    proposal = await generateProposal(
+      {
+        title: artifact.title || 'Untitled',
+        contentBody: md.body,
+        sourceUrl: artifact.sourceUrl,
+        frontmatterContext: frontmatterStr,
+        instructionSummary: instructionSummary?.summary,
+        workspaceRules: rules.map(r => `[${r.title}] ${r.content}`).join('\n'),
+        conversationHistory,
+      },
+      caseId,
+    );
+  } catch (err: any) {
+    const finishedAtIso = new Date().toISOString();
+    db.update(schema.aiRuns)
+      .set({
+        status: 'failed',
+        error: err?.message ?? String(err),
+        finishedAt: finishedAtIso,
+        durationMs: Date.now() - startedAtMs,
+      })
+      .where(eq(schema.aiRuns.id, aiRunId))
+      .run();
+    throw err;
+  }
 
   // 记录到内存上下文
   appendToContext(ctx, 'user', `Generate proposal for: ${artifact.title}`);
@@ -436,11 +518,9 @@ async function handleGenerateProposal(job: Job) {
     title: proposal.title,
     summary: proposal.summary,
     valueJudgement: proposal.valueJudgement,
-    suggestedActions: JSON.stringify(proposal.suggestedActions),
-    suggestedTargetPath: proposal.suggestedTargetPath,
+    proposedNextActions: JSON.stringify(proposal.proposedNextActions),
     reasoningSummary: proposal.reasoningSummary,
     risks: proposal.risks ? JSON.stringify(proposal.risks) : null,
-    requiresPatch: proposal.requiresPatch ? 1 : 0,
     rawJson: proposal.rawJson,
     createdAt: proposal.createdAt,
   }).run();
@@ -455,283 +535,35 @@ async function handleGenerateProposal(job: Job) {
     .where(eq(schema.cases.id, caseId))
     .run();
 
+  // ---- ai_runs: close the per-node row as succeeded (line 2) ----
+  // kind='proposal' rows link to the produced proposal; kind='turn' rows
+  // (invoke-next) intentionally leave proposalId null even though the
+  // fallback path also produced a proposal — the turn's "result" is the
+  // next-action menu, not the proposal record itself.
+  const finishedAtIso = new Date().toISOString();
+  db.update(schema.aiRuns)
+    .set({
+      status: 'succeeded',
+      outputSummary:
+        kind === 'turn'
+          ? (proposal.reasoningSummary ?? proposal.summary)?.slice(0, 1000)
+          : proposal.summary,
+      proposedNextActionsJson: JSON.stringify(proposal.proposedNextActions ?? []),
+      proposalId: kind === 'proposal' ? proposal.id : null,
+      finishedAt: finishedAtIso,
+      durationMs: Date.now() - startedAtMs,
+    })
+    .where(eq(schema.aiRuns.id, aiRunId))
+    .run();
+
   db.insert(schema.timelineEvents).values({
     id: genEventId(),
     caseId,
     type: 'ai_proposal_generated',
     actor: 'ai',
     summary: `Proposal: ${proposal.title} — ${proposal.reasoningSummary.slice(0, 100)}`,
-    dataJson: JSON.stringify({ proposalId: proposal.id }),
+    dataJson: JSON.stringify({ proposalId: proposal.id, aiRunId }),
     createdAt: new Date().toISOString(),
   }).run();
 }
-
-async function handleGeneratePatch(job: Job) {
-  const payload = JSON.parse(job.payloadJson);
-  const { caseId, patchIntentId, action } = payload;
-  const db = getDb();
-
-  // Ensure AI is configured
-  const sRow = await db.select().from(schema.settings).get();
-  if (sRow?.aiApiKeyEncrypted && sRow.aiBaseUrl) {
-    const { setAiConfig } = await import('@pkws/ai');
-    setAiConfig({
-      baseUrl: sRow.aiBaseUrl,
-      apiKey: sRow.aiApiKeyEncrypted,
-      defaultModel: sRow.aiDefaultModel,
-      maxTokens: sRow.aiMaxTokens ?? undefined,
-    });
-  }
-
-  const caseRow = await db.select()
-    .from(schema.cases)
-    .where(eq(schema.cases.id, caseId))
-    .get();
-  if (!caseRow) throw new Error(`Case not found: ${caseId}`);
-
-  const artifact = await db.select()
-    .from(schema.artifacts)
-    .where(eq(schema.artifacts.id, caseRow.primaryArtifactId))
-    .get();
-  if (!artifact) throw new Error('Artifact not found');
-
-  const md = await readMarkdown(artifact.vaultPath);
-  if (!md) throw new Error('Cannot read artifact file');
-
-  const instructionSummary = await db.select()
-    .from(schema.caseInstructionSummaries)
-    .where(eq(schema.caseInstructionSummaries.caseId, caseId))
-    .get();
-
-  const rules = await db.select()
-    .from(schema.workspaceRules)
-    .where(eq(schema.workspaceRules.enabled, true))
-    .orderBy(schema.workspaceRules.priority)
-    .all();
-
-  const pi = await db.select()
-    .from(schema.patchIntents)
-    .where(eq(schema.patchIntents.id, patchIntentId))
-    .get();
-
-  // Generate patch content
-  const operationsJson = await generatePatchContent(
-    action,
-    pi?.instruction || undefined,
-    pi?.targetPath || undefined,
-    artifact.title || 'Untitled',
-    md.content,
-    instructionSummary?.summary,
-    rules.map(r => `[${r.title}] ${r.content}`).join('\n'),
-    caseId,
-  );
-
-  // Compute base hashes
-  const operations = JSON.parse(operationsJson);
-  const baseHashes: Record<string, string> = {};
-  for (const op of operations) {
-    if (op.type === 'update_file') {
-      baseHashes[op.path] = await computeHash(op.path);
-    } else if (op.type === 'move_file') {
-      baseHashes[op.fromPath] = await computeHash(op.fromPath);
-    }
-  }
-
-  // Save patch manifest
-  const patchId = genPatchManifestId();
-  const now = new Date().toISOString();
-
-  db.insert(schema.patchManifests).values({
-    id: patchId,
-    caseId,
-    patchIntentId,
-    status: 'preview',
-    operationsJson,
-    baseFileHashesJson: JSON.stringify(baseHashes),
-    createdAt: now,
-    updatedAt: now,
-  }).run();
-
-  // Update patch intent status
-  db.update(schema.patchIntents)
-    .set({ status: 'generated', updatedAt: now })
-    .where(eq(schema.patchIntents.id, patchIntentId))
-    .run();
-
-  // Update case
-  db.update(schema.cases)
-    .set({ status: 'PatchPreview', currentPatchId: patchId, updatedAt: now })
-    .where(eq(schema.cases.id, caseId))
-    .run();
-
-  db.insert(schema.timelineEvents).values({
-    id: genEventId(),
-    caseId,
-    type: 'patch_generated',
-    actor: 'ai',
-    summary: `Patch generated: ${operations.length} operation(s)`,
-    dataJson: JSON.stringify({ patchId }),
-    createdAt: now,
-  }).run();
-}
-
-async function handleApplyPatch(job: Job) {
-  const payload = JSON.parse(job.payloadJson);
-  const { caseId, patchManifestId } = payload;
-  const db = getDb();
-  const settings = await getSettings();
-
-  const patch = await db.select()
-    .from(schema.patchManifests)
-    .where(eq(schema.patchManifests.id, patchManifestId))
-    .get();
-  if (!patch) throw new Error(`Patch not found: ${patchManifestId}`);
-
-  const backupDir = path.join(settings.workspacePath, 'backups', caseId);
-
-  db.update(schema.cases)
-    .set({ status: 'Applying', updatedAt: new Date().toISOString() })
-    .where(eq(schema.cases.id, caseId))
-    .run();
-
-  db.insert(schema.timelineEvents).values({
-    id: genEventId(),
-    caseId,
-    type: 'apply_started',
-    actor: 'system',
-    summary: 'Applying patch to vault',
-    createdAt: new Date().toISOString(),
-  }).run();
-
-  try {
-    const applyManifest = await executePatch(patch as any, {
-      vaultPath: settings.vaultPath,
-      backupsPath: backupDir,
-    });
-
-    // Save apply manifest
-    db.insert(schema.applyManifests).values({
-      id: applyManifest.id,
-      caseId: applyManifest.caseId,
-      patchManifestId: applyManifest.patchManifestId,
-      status: applyManifest.status,
-      appliedOperationsJson: applyManifest.appliedOperationsJson,
-      backupRefsJson: applyManifest.backupRefsJson,
-      appliedAt: applyManifest.appliedAt,
-    }).run();
-
-    // Update patch status
-    db.update(schema.patchManifests)
-      .set({ status: 'applied', updatedAt: new Date().toISOString() })
-      .where(eq(schema.patchManifests.id, patchManifestId))
-      .run();
-
-    // Update case status
-    db.update(schema.cases)
-      .set({ status: 'Done', closedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-      .where(eq(schema.cases.id, caseId))
-      .run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'apply_completed',
-      actor: 'system',
-      summary: `Patch applied successfully — ${applyManifest.id}`,
-      dataJson: JSON.stringify({ applyManifestId: applyManifest.id }),
-      createdAt: new Date().toISOString(),
-    }).run();
-  } catch (err: any) {
-    // Rollback in case of error
-    db.update(schema.cases)
-      .set({ status: 'Error', updatedAt: new Date().toISOString() })
-      .where(eq(schema.cases.id, caseId))
-      .run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'error_occurred',
-      actor: 'system',
-      summary: `Apply failed: ${err.message}`,
-      createdAt: new Date().toISOString(),
-    }).run();
-
-    throw err;
-  }
-}
-
-async function handleRollbackApply(job: Job) {
-  const payload = JSON.parse(job.payloadJson);
-  const { caseId, applyManifestId } = payload;
-  const db = getDb();
-  const settings = await getSettings();
-
-  const applyManifest = await db.select()
-    .from(schema.applyManifests)
-    .where(eq(schema.applyManifests.id, applyManifestId))
-    .get();
-  if (!applyManifest) throw new Error(`Apply manifest not found: ${applyManifestId}`);
-
-  const backupDir = path.join(settings.workspacePath, 'backups', caseId);
-
-  try {
-    await rollbackApply(applyManifest as any, backupDir, {
-      vaultPath: settings.vaultPath,
-      backupsPath: backupDir,
-    });
-
-    // Update statuses
-    db.update(schema.applyManifests)
-      .set({ status: 'rolled_back', rolledBackAt: new Date().toISOString() })
-      .where(eq(schema.applyManifests.id, applyManifestId))
-      .run();
-
-    const patchId = applyManifest.patchManifestId;
-    if (patchId) {
-      db.update(schema.patchManifests)
-        .set({ status: 'draft', updatedAt: new Date().toISOString() })
-        .where(eq(schema.patchManifests.id, patchId))
-        .run();
-    }
-
-    const caseRow = await db.select()
-      .from(schema.cases)
-      .where(eq(schema.cases.id, caseId))
-      .get();
-
-    if (caseRow) {
-      db.update(schema.cases)
-        .set({ status: 'RolledBack', closedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
-        .where(eq(schema.cases.id, caseId))
-        .run();
-    }
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'rollback_completed',
-      actor: 'system',
-      summary: `Rollback completed for apply ${applyManifestId}`,
-      createdAt: new Date().toISOString(),
-    }).run();
-  } catch (err: any) {
-    db.update(schema.applyManifests)
-      .set({ status: 'rollback_blocked' })
-      .where(eq(schema.applyManifests.id, applyManifestId))
-      .run();
-
-    db.insert(schema.timelineEvents).values({
-      id: genEventId(),
-      caseId,
-      type: 'error_occurred',
-      actor: 'system',
-      summary: `Rollback blocked: ${err.message}`,
-      createdAt: new Date().toISOString(),
-    }).run();
-
-    throw err;
-  }
-}
-
 

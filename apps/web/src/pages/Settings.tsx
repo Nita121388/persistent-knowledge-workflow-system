@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api.js';
-import { Plus, Trash2, Pencil, Settings2, Database, Bot, BookText, FolderOpen, ExternalLink, CheckCircle2, Cpu, RefreshCw, BookOpen, Power, PowerOff, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Pencil, Settings2, Database, Bot, BookText, ExternalLink, CheckCircle2, Cpu, RefreshCw, Power, PowerOff, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
 type Tab = 'general' | 'ai' | 'vault' | 'rules' | 'agent-runtime';
@@ -28,8 +28,29 @@ function PathDisplay({ label, path }: { label: string; path: string }) {
   );
 }
 
+function PathInput({ label, value, onChange, placeholder }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string;
+}) {
+  return (
+    <div>
+      <span className="text-xs text-gray-500 block mb-0.5">{label}</span>
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-pkws-500 focus:border-pkws-500"
+      />
+    </div>
+  );
+}
+
 export function SettingsPage({ tab: initialTab }: { tab?: string }) {
   const [activeTab, setActiveTab] = useState<Tab>((initialTab as Tab) || 'general');
+  const [isEditingPaths, setIsEditingPaths] = useState(false);
+  const [editVaultPath, setEditVaultPath] = useState('');
+  const [editInboxPath, setEditInboxPath] = useState('');
+  const [editWorkspacePath, setEditWorkspacePath] = useState('');
   const queryClient = useQueryClient();
 
   const { data: settingsData } = useQuery({
@@ -88,6 +109,32 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
     },
   });
 
+  // Picks default CLI from detected agents. '' means auto-detect.
+  const selectCliMutation = useMutation({
+    mutationFn: (cliPath: string) => apiPost('/agent-runtime/select-cli', { cliPath }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      queryClient.invalidateQueries({ queryKey: ['available-agents'] });
+    },
+  });
+
+  const updatePathsMutation = useMutation({
+    mutationFn: (data: { vaultPath: string; inboxPath: string; workspacePath: string }) =>
+      apiPut('/settings', data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setIsEditingPaths(false);
+    },
+  });
+
+  const startEditing = () => {
+    if (!settings) return;
+    setEditVaultPath(settings.vaultPath || '');
+    setEditInboxPath(settings.inboxPath || '');
+    setEditWorkspacePath(settings.workspacePath || '');
+    setIsEditingPaths(true);
+  };
+
   const tabs = [
     { key: 'general' as Tab, label: 'General', icon: Settings2 },
     { key: 'ai' as Tab, label: 'AI', icon: Bot },
@@ -132,12 +179,66 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
                 </div>
 
                 <div className="border-t border-gray-100 pt-4 mt-4">
-                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Paths</h3>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Paths</h3>
+                    {!isEditingPaths ? (
+                      <button
+                        onClick={startEditing}
+                        className="flex items-center gap-1 text-xs text-pkws-600 hover:text-pkws-700 font-medium"
+                      >
+                        <Pencil className="w-3 h-3" />
+                        Edit
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setIsEditingPaths(false)}
+                          className="text-xs text-gray-500 hover:text-gray-700 font-medium"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => updatePathsMutation.mutate({
+                            vaultPath: editVaultPath,
+                            inboxPath: editInboxPath,
+                            workspacePath: editWorkspacePath,
+                          })}
+                          disabled={updatePathsMutation.isPending || !editVaultPath || !editInboxPath || !editWorkspacePath}
+                          className="flex items-center gap-1 text-xs bg-pkws-600 text-white px-3 py-1 rounded-lg hover:bg-pkws-700 disabled:opacity-40 transition-colors font-medium"
+                        >
+                          {updatePathsMutation.isPending ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="w-3 h-3" />
+                          )}
+                          Save
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <div className="space-y-2">
-                    <PathDisplay label="Vault" path={settings.vaultPath} />
-                    <PathDisplay label="Inbox" path={settings.inboxPath} />
-                    <PathDisplay label="Workspace" path={settings.workspacePath} />
-                    {settings.vaultPath && (
+                    {isEditingPaths ? (
+                      <>
+                        <PathInput label="Vault" value={editVaultPath} onChange={setEditVaultPath} placeholder="/path/to/obsidian/vault" />
+                        <PathInput label="Inbox" value={editInboxPath} onChange={setEditInboxPath} placeholder="/path/to/vault/inbox" />
+                        <PathInput label="Workspace" value={editWorkspacePath} onChange={setEditWorkspacePath} placeholder="/path/to/pkws-workspace" />
+                        {updatePathsMutation.isError && (
+                          <p className="text-xs text-red-500 mt-1">
+                            Failed to save: {updatePathsMutation.error?.message || 'Unknown error'}
+                          </p>
+                        )}
+                        {updatePathsMutation.isSuccess && (
+                          <p className="text-xs text-green-600 mt-1">Paths updated successfully.</p>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <PathDisplay label="Vault" path={settings.vaultPath} />
+                        <PathDisplay label="Inbox" path={settings.inboxPath} />
+                        <PathDisplay label="Workspace" path={settings.workspacePath} />
+                      </>
+                    )}
+                    {settings.vaultPath && !isEditingPaths && (
                       <div className="pt-1">
                         <button
                           onClick={() => {
@@ -237,9 +338,19 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
             <h2 className="font-semibold mb-4">Vault Configuration</h2>
             {settings ? (
               <div className="space-y-3">
-                <PathDisplay label="Vault Root" path={settings.vaultPath} />
-                <PathDisplay label="Inbox Directory" path={settings.inboxPath} />
-                <PathDisplay label="Workspace" path={settings.workspacePath} />
+                {isEditingPaths ? (
+                  <>
+                    <PathInput label="Vault Root" value={editVaultPath} onChange={setEditVaultPath} placeholder="/path/to/obsidian/vault" />
+                    <PathInput label="Inbox Directory" value={editInboxPath} onChange={setEditInboxPath} placeholder="/path/to/vault/inbox" />
+                    <PathInput label="Workspace" value={editWorkspacePath} onChange={setEditWorkspacePath} placeholder="/path/to/pkws-workspace" />
+                  </>
+                ) : (
+                  <>
+                    <PathDisplay label="Vault Root" path={settings.vaultPath} />
+                    <PathDisplay label="Inbox Directory" path={settings.inboxPath} />
+                    <PathDisplay label="Workspace" path={settings.workspacePath} />
+                  </>
+                )}
               </div>
             ) : (
               <div className="text-center py-8">
@@ -457,11 +568,11 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
                           {agent.path && (
                             <span className={cn(
                               'text-xs px-1.5 py-0.5 rounded font-medium',
-                              settings.agentCliPath === agent.path || (!settings.agentCliPath && availableAgents.indexOf(agent) === 0)
+                              settings.agentCliPath === agent.path
                                 ? 'bg-green-100 text-green-700'
                                 : 'bg-gray-100 text-gray-500',
                             )}>
-                              {settings.agentCliPath === agent.path || (!settings.agentCliPath && availableAgents.indexOf(agent) === 0) ? 'Active' : 'Available'}
+                              {settings.agentCliPath === agent.path ? 'Selected' : 'Available'}
                             </span>
                           )}
                         </div>
@@ -472,14 +583,50 @@ export function SettingsPage({ tab: initialTab }: { tab?: string }) {
 
                 {/* Default CLI Selector */}
                 <div className="border-t border-gray-100 pt-4">
-                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Default CLI</h3>
-                  <div className="text-xs text-gray-500 mb-2">
-                    To switch CLI, update settings via the API and restart the server.
-                  </div>
-                  <div className="text-sm">
-                    <span className="text-gray-500">Current:</span>{' '}
-                    <span className="font-mono text-sm font-medium">{settings.agentCliPath || '(auto-detect)'}</span>
-                  </div>
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+                    Default CLI
+                  </h3>
+                  {availableAgents.length === 0 ? (
+                    <div className="text-xs text-gray-400 italic">
+                      No CLI agents detected. Install{' '}
+                      <a href="https://docs.anthropic.com/en/docs/claude-code/overview" className="underline" target="_blank" rel="noopener noreferrer">Claude Code</a>{' '}
+                      or{' '}
+                      <a href="https://github.com/openai/codex" className="underline" target="_blank" rel="noopener noreferrer">Codex CLI</a>{' '}
+                      to enable selection.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <select
+                        value={settings.agentCliPath || ''}
+                        onChange={e => selectCliMutation.mutate(e.target.value)}
+                        disabled={selectCliMutation.isPending}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-pkws-500 focus:border-pkws-500 disabled:opacity-50"
+                      >
+                        <option value="">Auto-detect (recommended)</option>
+                        {availableAgents.map((agent: any) => (
+                          <option key={agent.id} value={agent.path} disabled={!agent.path}>
+                            {agent.name}{agent.path ? ` — ${agent.path}` : ' (not on PATH)'}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="text-xs text-gray-500">
+                        {selectCliMutation.isPending ? (
+                          <span className="flex items-center gap-1.5">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Switching…
+                          </span>
+                        ) : selectCliMutation.isError ? (
+                          <span className="text-red-500">
+                            Failed: {selectCliMutation.error?.message || 'Unknown error'}
+                          </span>
+                        ) : (
+                          <span>
+                            Pick which CLI is used for AI proposals and patches. Auto-detect prefers the first one found
+                            (currently <span className="font-mono">{availableAgents[0]?.name ?? 'none'}</span>).
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2 text-sm">

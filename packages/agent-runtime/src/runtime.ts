@@ -1,7 +1,7 @@
 import type { AgentRuntimeOptions, SessionPersistence, CaseSession } from './types.js';
 import { type CaseId } from '@pkws/shared';
 import { DEFAULTS } from './types.js';
-import { resolveCliPath, detectAvailableAgents } from './agent-detect.js';
+import { resolveCliPath, detectAvailableAgents, detectAgentIdFromPath } from './agent-detect.js';
 import { SessionManager } from './session.js';
 import { Scheduler, type SchedulerEvent } from './scheduler.js';
 import { verifyCli } from './cli-runner.js';
@@ -75,6 +75,16 @@ export class AgentRuntime {
     this.cliPath = resolveCliPath(this.options.cliPath);
     console.log(`[AgentRuntime] Resolved CLI: ${this.cliPath}`);
 
+    // Detect which CLI family the resolved path refers to (used by the runner
+    // to pick --session-id scheme + transcript-path lookup). May be null for
+    // a custom binary.
+    const detectedAgentId = detectAgentIdFromPath(this.cliPath);
+    if (detectedAgentId) {
+      console.log(`[AgentRuntime] Detected agent: ${detectedAgentId}`);
+    } else {
+      console.log('[AgentRuntime] Agent CLI name unrecognized — session/transcript recording disabled.');
+    }
+
     // Verify CLI is executable
     const isValid = await verifyCli(this.cliPath);
     if (!isValid) {
@@ -90,6 +100,7 @@ export class AgentRuntime {
       sessionManager: this.sessionManager,
       workspacePath: this.options.workspacePath,
       cliPath: this.cliPath,
+      agentId: detectedAgentId ?? undefined,
       compressThreshold: this.options.contextCompressThreshold,
       keepRecentCount: this.options.contextKeepRecentCount,
       maxTokensPerSession: this.options.maxTokensPerSession,

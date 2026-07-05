@@ -93,7 +93,8 @@ packages/agent-runtime/
 - Server 集成：`index.ts` 并行启动 + `cases.ts` comment 路由重定向
 - 持久化：`SessionPersistence` 接口 + `agent_sessions` 表 + eviction 自动保存 + 恢复逻辑
 - 输出解析：`parseCliOutput()` — Zod 校验 proposal.json / patch-operations.json
-- 输出写入：`writeProposal()` / `writePatch()` — 写入 PKWS proposals/patch_manifests 表
+- 输出写入：`writeProposal()` 写 proposals 表；`applyVaultOps()` 直接把 patch-operations.json 应用到真 vault 并写一条 `vault_modified` timeline 事件（patch_manifests 表已退役，回滚交给 Obsidian 原生版本历史）
+- AI 运行节点：`recordAiTurn()` 写 `ai_runs` 表，供 CaseDetail 的 AiRunCard 透明展示每一轮投喂给 AI 的 rulesSnapshot / inputContext
 - Case 数据注入：`loadCaseData()` — 从 SQLite 加载 artifact 内容到 CLAUDE.md
 
 ### 2.5 验证结果

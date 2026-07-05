@@ -136,6 +136,23 @@ export function resolveCliPath(userOverride?: string): string {
 }
 
 /**
+ * Best-effort detect which CLI family a resolved CLI path refers to, by name.
+ * Used by the CLI runner to pick the right --session-id flag scheme and
+ * transcript-location lookup. Returns null when the path doesn't look like
+ * either (e.g. a custom binary name) — the runner treats these as a generic
+ * `--print` single-shot and skips session recording.
+ */
+export function detectAgentIdFromPath(cliPath: string): 'claude' | 'codex' | null {
+  const base = path.basename(cliPath.toLowerCase());
+  // strip any Windows shell-suffix
+  const trimmed = base.replace(/\.(exe|cmd|bat|ps1)$/, '');
+  if (trimmed === 'codex' || trimmed.includes('codex')) return 'codex';
+  if (trimmed === 'claude' || trimmed.includes('claude')) return 'claude';
+  return null;
+}
+
+
+/**
  * Quick check whether any agent is available.
  */
 export function isAnyAgentAvailable(): boolean {
