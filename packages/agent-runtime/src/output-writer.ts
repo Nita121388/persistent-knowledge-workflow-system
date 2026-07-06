@@ -3,6 +3,7 @@ import type { CliProposal, CliPatchOperation } from './output-parser.js';
 import { genProposalId, genEventId } from '@pkws/shared/utils.js';
 import { applyOperations, type VaultSafetyConfig } from '@pkws/vault';
 import type { PatchOperation } from '@pkws/shared';
+import { eq } from 'drizzle-orm';
 
 /**
  * Write CLI output (proposal / patch operations) back to PKWS database tables.
@@ -56,7 +57,7 @@ export async function writeProposal(
     status: 'ReviewRequired',
     currentProposalId: proposalId,
     updatedAt: now,
-  }).where(schema.cases.id.eq(caseId)).run();
+  }).where(eq(schema.cases.id, caseId)).run();
 
   db.insert(schema.timelineEvents).values({
     id: genEventId(),
@@ -159,7 +160,7 @@ export async function applyVaultOps(
   // executing a user-approved modify_vault next-step, not a state change.
   db.update(schema.cases).set({
     updatedAt: now,
-  }).where(schema.cases.id.eq(caseId)).run();
+  }).where(eq(schema.cases.id, caseId)).run();
 
   if (!applyError) {
     console.log(`[OutputWriter] Applied ${operations.length} vault op(s) for ${caseId} (apply=${applyManifestId})`);

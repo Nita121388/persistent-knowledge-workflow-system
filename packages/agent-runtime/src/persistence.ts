@@ -1,6 +1,7 @@
 import type { CaseId } from '@pkws/shared';
 import type { SessionPersistence, Message } from './types.js';
 import { DEFAULTS } from './types.js';
+import { eq } from 'drizzle-orm';
 
 /**
  * Keep only the most recent N messages for persistence.
@@ -36,7 +37,7 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
 
       const now = new Date().toISOString();
       const recentJson = data.recentMessages ? JSON.stringify(data.recentMessages) : null;
-      const row = db.select().from(schema.agentSessions).where(schema.agentSessions.caseId.eq(caseId)).get();
+      const row = db.select().from(schema.agentSessions).where(eq(schema.agentSessions.caseId, caseId)).get();
 
       if (row) {
         db.update(schema.agentSessions).set({
@@ -47,7 +48,7 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
           compressionEpoch: data.compressionEpoch,
           awaitingUserInput: data.awaitingUserInput,
           updatedAt: now,
-        }).where(schema.agentSessions.caseId.eq(caseId)).run();
+        }).where(eq(schema.agentSessions.caseId, caseId)).run();
       } else {
         db.insert(schema.agentSessions).values({
           caseId,
@@ -63,7 +64,7 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
     },
 
     async load(caseId: CaseId) {
-      const row = db.select().from(schema.agentSessions).where(schema.agentSessions.caseId.eq(caseId)).get();
+      const row = db.select().from(schema.agentSessions).where(eq(schema.agentSessions.caseId, caseId)).get();
       if (!row) return null;
 
       // Try new recentMessagesJson first, fallback to old messagesJson
@@ -101,7 +102,7 @@ export function createPersistence(db: any, schema: any): SessionPersistence {
     },
 
     async delete(caseId: CaseId) {
-      db.delete(schema.agentSessions).where(schema.agentSessions.caseId.eq(caseId)).run();
+      db.delete(schema.agentSessions).where(eq(schema.agentSessions.caseId, caseId)).run();
     },
   };
 }

@@ -88,6 +88,9 @@ export function SetupWizard() {
         vaultPath, inboxPath, workspacePath,
         aiProvider, aiBaseUrl, aiApiKey, aiDefaultModel,
         autoAnalyze: true,
+        // Default to the agent runtime as the execution path; user can turn it
+        // off later in Settings → Agent Runtime. Layout topbar reflects state.
+        agentRuntimeEnabled: true,
       });
       if (result.ok) {
         queryClient.invalidateQueries({ queryKey: ['settings'] });

@@ -71,25 +71,31 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
   const startTime = Date.now();
 
   // Resolve which CLI family we're driving and mint a session id. The session
-  // id is passed to the CLI as --session-id, and on-disk transcript files are
-  // located under that id (see locateTranscriptPath below).
+  // id is passed to the CLI as --session-id (claude only — codex 0.142.3
+  // removed this flag), and on-disk transcript files are located using it as
+  // a correlation key (see locateTranscriptPath below). For codex the id is
+  // only used by the transcript locator's fallback scan; the CLI itself gets
+  // a fresh internal id per invocation.
   const agentId = options.agentId ?? detectAgentIdFromPath(cliPath);
   const sessionId = agentId ? crypto.randomUUID() : undefined;
 
   // On Windows, npm wrappers need shell for execution
   const isWindows = process.platform === 'win32';
-  const { spawnCmd, spawnArgs, spawnShell } = buildSpawnInvocation(
+  const { spawnCmd, spawnArgs, spawnShell, promptViaStdin } = buildSpawnInvocation(
     cliPath,
     taskPrompt,
     sessionId,
     agentId,
     isWindows,
+    sandboxMode,
   );
 
   return new Promise<CliResult>((resolve) => {
     const child = spawn(spawnCmd, spawnArgs, {
       cwd: workDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // stdin is piped when we feed the prompt via stdin (codex); otherwise
+      // it is ignored (claude/--print path passes prompt as positional arg).
+      stdio: [promptViaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       shell: spawnShell,
       env: {
         ...process.env,
@@ -102,6 +108,14 @@ export async function runCliAgent(options: CliRunnerOptions): Promise<CliResult>
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+
+    // Feed the prompt via stdin when the invocation requests it (codex). The
+    // CLI reads its initial instructions from stdin when no positional PROMPT
+    // is supplied. End the stream so the CLI sees EOF and starts processing.
+    if (promptViaStdin && child.stdin) {
+      child.stdin.write(taskPrompt);
+      child.stdin.end();
+    }
 
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -307,10 +321,14 @@ function copyVaultFilesForContext(vaultPath: string, targetDir: string): number 
  * A real jsonl transcript is written to ~/.claude/projects/<dir-slug>/<uuid>.jsonl
  * where <dir-slug> is the workDir path with separators replaced by '-'.
  *
- * Codex headless mode:
- *   `codex exec --session-id <uuid> <taskPrompt>`
- * A jsonl rollout file is written to ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
- * and the session_id appears in the first session_meta record.
+ * Codex headless mode (codex 0.142.3+, which removed `--session-id`):
+ *   `codex exec --skip-git-repo-check --sandbox <policy> <taskPrompt>`
+ * where <policy> is `workspace-write` for workspace-only / vault-readonly
+ * sandbox modes and `danger-full-access` for `full`. Conversation
+ * continuity is provided by buildContext() flattening session.messages
+ * into the prompt, not by codex's resume mechanism. A jsonl rollout file
+ * is written to ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<codex-uuid>.jsonl
+ * where <codex-uuid> is minted internally by codex (NOT our sessionId).
  *
  * Custom / unknown CLI:
  *   falls back to the legacy `--print <taskPrompt>` single-shot, no session
@@ -322,13 +340,14 @@ function buildSpawnInvocation(
   sessionId: string | undefined,
   agentId: 'claude' | 'codex' | null,
   isWindows: boolean,
-): { spawnCmd: string; spawnArgs: string[]; spawnShell: boolean } {
+  sandboxMode: 'workspace-only' | 'vault-readonly' | 'full',
+): { spawnCmd: string; spawnArgs: string[]; spawnShell: boolean; promptViaStdin: boolean } {
   // On Windows the npm wrappers are .cmd/.ps1 scripts that need a shell
   // to be executed; on POSIX we can exec the binary directly.
-  const wrapWindows = (args: string[]) =>
+  const wrapWindows = (args: string[], promptViaStdin = false) =>
     isWindows
-      ? { spawnCmd: process.env.COMSPEC || 'cmd.exe', spawnArgs: ['/c', cliPath, ...args], spawnShell: true }
-      : { spawnCmd: cliPath, spawnArgs: args, spawnShell: false };
+      ? { spawnCmd: process.env.COMSPEC || 'cmd.exe', spawnArgs: ['/c', cliPath, ...args], spawnShell: true, promptViaStdin }
+      : { spawnCmd: cliPath, spawnArgs: args, spawnShell: false, promptViaStdin };
 
   if (agentId === 'claude' && sessionId) {
     return wrapWindows([
@@ -342,8 +361,30 @@ function buildSpawnInvocation(
   }
 
   if (agentId === 'codex' && sessionId) {
-    // `codex exec` runs the model non-interactively and writes a rollout file.
-    return wrapWindows(['exec', '--session-id', sessionId, taskPrompt]);
+    // codex 0.142.3 removed `--session-id`. The CLI runs a fresh
+    // non-interactive session each invocation; conversation continuity
+    // between scheduler turns is provided by buildContext() flattening
+    // session.messages into the prompt, NOT by codex's own resume
+    // mechanism (the scheduler does not persist codex's native session_id
+    // across turns). So we run a plain `codex exec` plus a few flags that
+    // map our sandbox modes onto codex's --sandbox policy:
+    //   workspace-only / vault-readonly → workspace-write
+    //   full                            → danger-full-access
+    // --skip-git-repo-check is required because the agent workDir
+    // (workspace/agents/<caseId>/) is generally not a git repo.
+    //
+    // The prompt is piped via stdin (codex reads it when no positional
+    // PROMPT arg is supplied). This avoids Windows cmd.exe splitting the
+    // multi-line markdown prompt on newlines and feeding codex tokens
+    // like `CLAUDE.md` as separate unexpected arguments.
+    //
+    // We still mint our own `sessionId` (above) and use it in
+    // locateTranscriptPath's fallback scan, but it is no longer passed
+    // to the CLI.
+    const sandboxArg = sandboxMode === 'full'
+      ? ['--sandbox', 'danger-full-access']
+      : ['--sandbox', 'workspace-write'];
+    return wrapWindows(['exec', '--skip-git-repo-check', ...sandboxArg], /* promptViaStdin */ true);
   }
 
   // Custom / unknown CLI — keep legacy single-shot behaviour.

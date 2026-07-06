@@ -687,15 +687,65 @@ export const caseRoutes: FastifyPluginAsync = async (app) => {
   });
 
   // POST /cases/:caseId/proposals/regenerate
+  // Resembles /comment (cases.ts above) but without the comment-text write:
+  // we just want the AI to regenerate the proposal based on the latest
+  // context. Routes through the Agent Runtime when it is active, else falls
+  // back to the legacy generate_proposal job queue.
   app.post('/cases/:caseId/proposals/regenerate', async (request, reply) => {
     const { caseId } = request.params as { caseId: string };
+    const db = getDb();
+
+    // If Agent Runtime is active, route the input there. Same shape as
+    // /analyze and /comment — load rules + instruction summary, enqueue the
+    // case, and feed the user input that drives the next turn.
+    if (agentRuntime) {
+      const rules = await db.select()
+        .from(schema.workspaceRules)
+        .where(eq(schema.workspaceRules.enabled, true))
+        .orderBy(schema.workspaceRules.priority)
+        .all();
+
+      const instructionSummary = await db.select()
+        .from(schema.caseInstructionSummaries)
+        .where(eq(schema.caseInstructionSummaries.caseId, caseId))
+        .get();
+
+      agentRuntime.enqueueCase(caseId, {
+        workspaceRules: rules,
+        caseInstructions: instructionSummary?.summary || '',
+      });
+
+      agentRuntime.onUserInput(caseId, 'Regenerate the proposal based on the latest context.');
+      return { ok: true, data: { success: true, mode: 'agent-runtime' } };
+    }
+
+    // Fallback: use the existing job queue path. Cancel any existing pending
+    // / running generate_proposal jobs for this case first so a stale queued
+    // job doesn't race with the new one. Mirrors /comment's fallback cleanup.
+    const existingJobs = await db.select()
+      .from(schema.jobs)
+      .where(
+        and(
+          eq(schema.jobs.type, 'generate_proposal'),
+          like(schema.jobs.payloadJson, `%${caseId}%`),
+          inArray(schema.jobs.status, ['queued', 'running'])
+        )
+      )
+      .all();
+    for (const oldJob of existingJobs) {
+      db.update(schema.jobs)
+        .set({ status: 'cancelled', finishedAt: new Date().toISOString() })
+        .where(eq(schema.jobs.id, oldJob.id))
+        .run();
+    }
+
     const { createJob } = await import('../worker/job-queue.js');
     const job = await createJob({
       type: 'generate_proposal',
       payload: { caseId, reason: 'user_requested_regenerate' },
     });
 
-    return { ok: true, data: { jobId: job.id } };
+    return { ok: true, data: { jobId: job.id, mode: 'job-queue' } };
   });
 
   // GET /cases/:caseId/proposals

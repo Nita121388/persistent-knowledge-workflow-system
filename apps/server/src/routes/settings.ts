@@ -8,6 +8,8 @@ import path from 'node:path';
 import { initStorage } from '@pkws/storage';
 import { startWorker } from '../worker/index.js';
 import { initFileWatcher } from '../watcher.js';
+import { setAgentRuntime, loadSettings } from '../index.js';
+import { broadcastWsEvent } from '../ws-broadcast.js';
 
 const CONFIG_PATH = path.join(import.meta.dirname, '..', '..', 'config.json');
 
@@ -156,8 +158,9 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
           aiDefaultModel: data.aiDefaultModel,
           aiMaxTokens: data.aiMaxTokens ?? null,
           autoAnalyze: data.autoAnalyze,
-          // Agent Runtime settings (defaults)
-          agentRuntimeEnabled: data.agentRuntimeEnabled ?? false,
+          // Agent Runtime settings (defaults). Default to enabled unless the
+          // caller explicitly opts out — the agent runtime is the primary path.
+          agentRuntimeEnabled: data.agentRuntimeEnabled ?? true,
           agentCliPath: data.agentCliPath ?? '',
           autoDetectAgents: data.autoDetectAgents ?? true,
           maxActiveSessions: data.maxActiveSessions ?? 10,
@@ -213,6 +216,44 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     // Start worker and watcher if not already running
     startWorker();
     initFileWatcher(data.inboxPath);
+
+    // Hot-start the Agent Runtime if the user wants it on. The server-startup
+    // path in index.ts only runs once per process; once a process is already
+    // running (the common case for first-time setup via SetupWizard, or any
+    // subsequent settings change), we have to start the runtime here too —
+    // otherwise the runtime stays null until the next server restart, and
+    // every /regenerate / /analyze / /comment falls back to the legacy
+    // job-queue path. Mirrors the Start branch of /agent-runtime/toggle.
+    if (data.agentRuntimeEnabled !== false) {
+      try {
+        const loaded = await loadSettings();
+        if (loaded) {
+          const { createPersistence, startAgentRuntime } = await import('@pkws/agent-runtime');
+          const persistence = createPersistence(getDb(), schema);
+          const runtime = await startAgentRuntime({
+            db: getDb(),
+            workspacePath: loaded.workspacePath,
+            vaultPath: loaded.vaultPath,
+            cliPath: loaded.agentCliPath || undefined,
+            maxActiveSessions: loaded.maxActiveSessions,
+            sessionTimeoutMinutes: loaded.sessionTimeoutMinutes,
+            contextCompressThreshold: loaded.contextCompressThreshold,
+            contextKeepRecentCount: loaded.contextKeepRecentCount,
+            maxTokensPerSession: loaded.maxTokensPerSession,
+            sandboxMode: loaded.sandboxMode,
+            persistence,
+          });
+          runtime.setWsBroadcast((event: any) => { broadcastWsEvent(event); });
+          setAgentRuntime(runtime);
+          console.log('[Setup] Agent Runtime started after settings save');
+        }
+      } catch (err: any) {
+        // The settings save itself already succeeded; don't fail the request
+        // if the runtime fails to start. The user can retry from the
+        // Agent Runtime Dashboard's toggle.
+        console.error('[Setup] Failed to start Agent Runtime after settings save:', err);
+      }
+    }
 
     return {
       ok: true,

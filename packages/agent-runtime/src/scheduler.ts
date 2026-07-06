@@ -8,6 +8,7 @@ import { runCliAgent, getAgentWorkDir, type CliRunnerOptions } from './cli-runne
 import { parseCliOutput, type ParsedCliOutput } from './output-parser.js';
 import { writeProposal, applyVaultOps, type OutputWriterOptions } from './output-writer.js';
 import type { SessionManager } from './session.js';
+import { eq } from 'drizzle-orm';
 
 /**
  * Emit a per-cycle queue_update event so WebSocket clients
@@ -29,16 +30,16 @@ async function loadCaseData(db: any, schema: any, caseId: string): Promise<CaseC
   if (!db || !schema) return undefined;
 
   try {
-    const caseRow = db.select().from(schema.cases).where(schema.cases.id.eq(caseId)).get();
+    const caseRow = db.select().from(schema.cases).where(eq(schema.cases.id, caseId)).get();
     if (!caseRow) return undefined;
 
     const artifact = caseRow.primaryArtifactId
-      ? db.select().from(schema.artifacts).where(schema.artifacts.id.eq(caseRow.primaryArtifactId)).get()
+      ? db.select().from(schema.artifacts).where(eq(schema.artifacts.id, caseRow.primaryArtifactId)).get()
       : null;
 
     const instructionSummary = db.select()
       .from(schema.caseInstructionSummaries)
-      .where(schema.caseInstructionSummaries.caseId.eq(caseId))
+      .where(eq(schema.caseInstructionSummaries.caseId, caseId))
       .get();
 
     if (!artifact) return undefined;
@@ -85,7 +86,7 @@ function reloadWorkspaceRules(db: any, schema: any, session: CaseSession): void 
   try {
     const fresh = db.select()
       .from(schema.workspaceRules)
-      .where(schema.workspaceRules.enabled.eq(true))
+      .where(eq(schema.workspaceRules.enabled, true))
       .orderBy(schema.workspaceRules.priority)
       .all();
     if (fresh && fresh.length >= 0) {
@@ -351,12 +352,15 @@ export class Scheduler {
               sessionId: result.sessionId ?? null,
               transcriptPath: result.transcriptPath ?? null,
             })
-            .where((this.schema.aiRuns as any).id.eq(aiRunId))
+            .where(eq((this.schema.aiRuns as any).id, aiRunId))
             .run();
         };
 
-        // Reset retry count on success
-        this.retryCounts.delete(caseId);
+        // Note: retryCounts is reset only on a successful turn (inside the
+        // exitCode===0 && !timedOut branch below). Resetting it here
+        // unconditionally would clear the retry counter between every failed
+        // CLI run, which makes retries stay at 1/3 forever and the scheduler
+        // can never give up and push the case to the wait queue.
 
         // Process the result
         if (result.exitCode === 0 && !result.timedOut) {
@@ -442,6 +446,10 @@ export class Scheduler {
           this.emitEvent?.({ type: 'turn_completed', caseId, result });
           emitQueueUpdate(this);
 
+          // Reset retry count on a successful turn — only here, not at the
+          // top of the try block. See comment above the if-branch.
+          this.retryCounts.delete(caseId);
+
           // Close the ai_runs row for this turn. proposal (if produced) is
           // mostly attached to a proposals-row pointer anyway; for turns the
           // narrative result is the next-action menu snapshot itself.
@@ -511,7 +519,7 @@ export class Scheduler {
               finishedAt: new Date().toISOString(),
               durationMs: Date.now() - startedAtMs,
             })
-            .where((this.schema.aiRuns as any).id.eq(aiRunId))
+            .where(eq((this.schema.aiRuns as any).id, aiRunId))
             .run();
         }
 

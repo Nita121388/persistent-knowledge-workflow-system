@@ -21,15 +21,22 @@ export default function App() {
 
   if (isLoading) return <LoadingScreen />;
 
-  // Only show setup wizard if settings definitively don't exist (NOT_INITIALIZED or NOT_FOUND)
+  // Backend may respond 4xx with {ok:false, error:{code}} (e.g. NOT_INITIALIZED).
+  // apiGet doesn't throw on 4xx — it returns the parsed body — so isError only
+  // fires on network/parse failure, and failureCount stays 0 for these responses.
+  // Treat an explicit error code as "needs setup" regardless of retry count;
+  // reserve the "Connecting..." fallback for genuinely unreachable backends.
   const errorCode = (!data?.ok && data?.error?.code) ? data.error.code : null;
-  const shouldShowSetup = (isError || errorCode === 'NOT_INITIALIZED' || errorCode === 'NOT_FOUND') && failureCount >= 3;
+  const shouldShowSetup =
+    errorCode === 'NOT_INITIALIZED' || errorCode === 'NOT_FOUND'
+      ? true
+      : isError && failureCount >= 3;
 
   if (shouldShowSetup) {
     return <SetupWizard />;
   }
 
-  // If settings API fails but we haven't exhausted retries, show a friendly message
+  // Settings API hard-failed (unreachable) and we haven't exhausted retries.
   if (isError || !data?.ok) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">

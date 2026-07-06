@@ -13,8 +13,11 @@ export const settings = sqliteTable('settings', {
   aiDefaultModel: text('ai_default_model').notNull(),
   aiMaxTokens: integer('ai_max_tokens'),
   autoAnalyze: integer('auto_analyze', { mode: 'boolean' }).notNull().default(true),
-  // Agent Runtime settings
-  agentRuntimeEnabled: integer('agent_runtime_enabled', { mode: 'boolean' }).notNull().default(false),
+  // Agent Runtime settings. Default to enabled: the agent runtime is the
+  // primary execution path (Phase 2+); the legacy job-queue is the fallback.
+  // SetupWizard also sends agentRuntimeEnabled:true, but we keep the column
+  // default aligned so any path that omits the field lands on "enabled".
+  agentRuntimeEnabled: integer('agent_runtime_enabled', { mode: 'boolean' }).notNull().default(true),
   agentCliPath: text('agent_cli_path').notNull().default(''),
   autoDetectAgents: integer('auto_detect_agents', { mode: 'boolean' }).notNull().default(true),
   maxActiveSessions: integer('max_active_sessions').notNull().default(10),

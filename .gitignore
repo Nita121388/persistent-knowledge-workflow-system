@@ -26,3 +26,6 @@ a.file))
 
 # local debugging snapshots
 setup-wizard-snapshot.md
+
+# Claude Code local session artifacts (plans, local permissions)
+.claude/
